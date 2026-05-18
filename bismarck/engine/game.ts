@@ -310,11 +310,8 @@ export class BismarckGame {
       return { rounds: [], germanVpGained: 0, britishVpGained: 0, shipsSunk: [], log: ['当前不是战斗阶段'] }
     }
 
-    // 找到战斗发生的格
-    let combatCoord: { q: number; r: number } | null = null
-    let isAir = false
-
-    // 先检查同格战斗
+    // 收集所有交火格 (德舰与英舰同格的每个位置)
+    const combatCoords = new Set<string>()
     for (const bShip of this.state.britishShips) {
       if (bShip.steps <= 0 || bShip.def.isDummy) continue
       const bPos = this.state.britishPositions.get(bShip.def.id)
@@ -322,15 +319,12 @@ export class BismarckGame {
       for (const gShip of this.state.germanShips) {
         if (gShip.steps <= 0) continue
         const gPos = this.state.germanPositions.get(gShip.def.id)
-        if (gPos && hexEquals(gPos, bPos)) {
-          combatCoord = gPos; break
-        }
+        if (gPos && hexEquals(gPos, bPos)) combatCoords.add(`${gPos.q},${gPos.r}`)
       }
-      if (combatCoord) break
     }
 
-    // 检查 Ark Royal 是否在相邻格 (同格战斗时也可航空攻击)
-    let airTarget: ShipState | undefined
+    // Ark Royal 航空攻击相邻格德军
+    let airTarget: ShipState | undefined; let airCoord: string | undefined
     const arkRoyal = this.state.britishShips.find(s => s.def.id === 'ark-royal' && s.steps > 0)
     if (arkRoyal) {
       const arPos = this.state.britishPositions.get('ark-royal')
@@ -339,43 +333,34 @@ export class BismarckGame {
           if (gShip.steps <= 0) continue
           const gPos = this.state.germanPositions.get(gShip.def.id)
           if (gPos && hexDistance(arPos, gPos) === 1) {
-            isAir = true; airTarget = gShip
-            if (!combatCoord) combatCoord = gPos  // 纯航空战斗用德军位置
-            break
+            airTarget = gShip; airCoord = `${gPos.q},${gPos.r}`; break
           }
         }
       }
     }
+    if (airCoord) combatCoords.add(airCoord)
 
-    if (!combatCoord) {
+    if (combatCoords.size === 0) {
       return { rounds: [], germanVpGained: 0, britishVpGained: 0, shipsSunk: [], log: ['没有发现战斗格'] }
     }
 
-    // 航空攻击: 找到德军目标
-    let airTarget: ShipState | undefined
-    if (isAir) {
-      airTarget = this.state.germanShips.find(s => {
-        if (s.steps <= 0) return false
-        const p = this.state.germanPositions.get(s.def.id)
-        return p && p.q === combatCoord.q && p.r === combatCoord.r
-      })
-    }
-    const result = resolveCombat(this.state, combatCoord, this.rng, isAir, airTarget)
-    this.state.vp.german += result.germanVpGained
-    this.state.vp.british += result.britishVpGained
-    this.L('combat', `战斗结算: 德+${result.germanVpGained}VP 英+${result.britishVpGained}VP`, result.log.join('; '))
-    if (result.shipsSunk.length > 0) {
-      this.L('combat', `击沉: ${result.shipsSunk.join(', ')}`)
+    // 每个交火格依次结算
+    const merged: ReturnType<typeof resolveCombat> = { rounds: [], germanVpGained: 0, britishVpGained: 0, shipsSunk: [], log: [] }
+    for (const key of combatCoords) {
+      const [q, r] = key.split(',').map(Number)
+      const coord = { q, r }
+      const isAir = airCoord === key && !!airTarget
+      const r2 = resolveCombat(this.state, coord, this.rng, isAir, isAir ? airTarget : undefined)
+      merged.rounds.push(...r2.rounds); merged.germanVpGained += r2.germanVpGained; merged.britishVpGained += r2.britishVpGained
+      merged.shipsSunk.push(...r2.shipsSunk); merged.log.push(...r2.log)
+      this.state.vp.german += r2.germanVpGained; this.state.vp.british += r2.britishVpGained
+      this.L('combat', `战斗(${hexToLabel(coord)}): 德+${r2.germanVpGained}VP 英+${r2.britishVpGained}VP`, r2.log.join('; '))
+      if (r2.shipsSunk.length > 0) this.L('combat', `击沉: ${r2.shipsSunk.join(', ')}`)
     }
 
     const victory = checkVictory(this.state)
-    if (victory.gameOver) {
-      this.endGame(victory)
-    } else {
-      this.endTurn()
-    }
-
-    return result
+    if (victory.gameOver) { this.endGame(victory) } else { this.endTurn() }
+    return merged
   }
 
   // ========== 运输舰队攻击 ==========

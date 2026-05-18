@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/Zhuanz1/Desktop/code/wargame/cppre/main'
+relocations:     []
+...
