@@ -79,8 +79,10 @@ private:
     }
 
 public:
-    // 构造函数，接收固定的种子
-    SeededRandom(uint32_t seed) : state(seed), counter(0) {}
+    // 不传种子 → 从硬件取随机种子
+    SeededRandom() : SeededRandom(std::random_device{}()) {}
+    // 传种子 → 可复现
+    explicit SeededRandom(uint32_t seed) : state(seed), counter(0) {}
 
     int d6() override {
         // 逻辑与 TS 保持完全一致
