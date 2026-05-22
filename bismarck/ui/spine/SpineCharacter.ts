@@ -27,6 +27,7 @@ export class SpineCharacter {
     const ctx = this.canvas.getContext('2d')!
     this.ctx = ctx
     this.renderer = new spine.canvas.SkeletonRenderer(ctx)
+    this.renderer.triangleRendering = true  // 启用 mesh/linked-mesh/clipping 渲染
 
     this.skeleton = new spine.Skeleton(asset.skeletonData)
 
