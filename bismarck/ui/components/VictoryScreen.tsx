@@ -4,9 +4,10 @@ interface VictoryScreenProps {
   gameState: GameState
   onNewGame: () => void
   onShowLog: () => void
+  onExportTensor: () => void
 }
 
-export function VictoryScreen({ gameState, onNewGame, onShowLog }: VictoryScreenProps) {
+export function VictoryScreen({ gameState, onNewGame, onShowLog, onExportTensor }: VictoryScreenProps) {
   const isGermanWin = gameState.winner === 'german'
 
   return (
@@ -45,10 +46,14 @@ export function VictoryScreen({ gameState, onNewGame, onShowLog }: VictoryScreen
           </div>
         </div>
 
-        <div className="flex gap-3 justify-center">
+        <div className="flex gap-3 justify-center flex-wrap">
           <button onClick={onShowLog}
             className="px-4 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-bold border border-white/30 transition">
             📋 查看日志
+          </button>
+          <button onClick={onExportTensor}
+            className="px-4 py-3 bg-purple-700 hover:bg-purple-600 text-purple-200 rounded-lg font-bold border border-purple-500 transition">
+            🧠 导出训练数据
           </button>
           <button onClick={onNewGame}
             className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-bold text-lg border border-white/30 transition">

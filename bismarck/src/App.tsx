@@ -16,6 +16,7 @@ import { GameLog } from '../engine/log'
 import { BismarckEnv, GameAction } from '../engine/env'
 import type { CombatResult } from '../engine/combat'
 import { GERMAN_START_HEXES } from '../engine/map'
+import { useTensorLogger } from '../ui/hooks/useTensorLogger'
 
 function loadCalibration() {
   const s = localStorage.getItem('bismarck_map_scale')
@@ -78,6 +79,25 @@ export default function App() {
     refresh,
   } = useGame(log)
 
+  const tensorLog = useTensorLogger()
+  const prevStateRef = useRef<string>('')
+
+  // 新游戏开始时重置日志
+  useEffect(() => { if (gameState) tensorLog.startLogging(gameState) }, [])
+  // 每次状态变化时记录一步
+  useEffect(() => {
+    if (!gameState || gameState.gameOver || isAITurn) return
+    const key = `${gameState.turn}|${gameState.phase}|${gameState.phaseStep}`
+    if (key === prevStateRef.current) return
+    prevStateRef.current = key
+    const player = (gameState.phase === 'setup-german' || gameState.phase === 'german-move' || gameState.phase === 'transport-attack') ? 'german' : 'british'
+    tensorLog.recordStep(gameState, player, 0)
+  }, [gameState])
+
+  const handleExportTensor = useCallback(() => {
+    if (gameState) tensorLog.exportLogs(gameState)
+  }, [gameState, tensorLog])
+
   const [combatResult, setCombatResult] = useState<CombatResult | null>(null)
   const [showTransport, setShowTransport] = useState(false)
   const [phaseMessage, setPhaseMessage] = useState('')
@@ -95,6 +115,7 @@ export default function App() {
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('bismarck_reasoning_effort') || 'low')
   const [tokenScale, setTokenScale] = useState(() => parseFloat(localStorage.getItem('bismarck_token_scale') || '1'))
   const [mapZoom, setMapZoom] = useState(() => parseFloat(localStorage.getItem('bismarck_map_zoom') || '1'))
+  const [displayMode, setDisplayMode] = useState<'token' | 'sprite'>(() => (localStorage.getItem('bismarck_display_mode') as 'token' | 'sprite') || 'sprite')
   const aiRunningRef = useRef(false)
   const mapBase64Ref = useRef<string>('')
   const mapSentRef = useRef(false)
@@ -454,10 +475,11 @@ export default function App() {
   }, [doSearch])
 
   const handleFinishSearch = useCallback(() => {
+    doSearch()  // 始终执行同格索敌（处理伪装鉴定），即使航空索敌已发现德军
     finishSearch()
     if (gameState.combatPending) setPhaseMessage('进入战斗阶段!')
     else if (gameState.transportPending) setShowTransport(true)
-  }, [finishSearch, gameState.combatPending, gameState.transportPending])
+  }, [doSearch, finishSearch, gameState.combatPending, gameState.transportPending])
 
   const handleDoCombat = useCallback(() => {
     setCombatResult(doCombat())
@@ -573,6 +595,14 @@ export default function App() {
           <input type="range" min="0.5" max="2" step="0.1" value={mapZoom}
             onChange={e => { const v = parseFloat(e.target.value); setMapZoom(v); localStorage.setItem('bismarck_map_zoom', String(v)) }}
             className="w-16 h-4" title={`地图缩放: ${Math.round(mapZoom * 100)}%`} />
+          <span className="text-slate-600">|</span>
+          <button
+            onClick={() => { const m = displayMode === 'sprite' ? 'token' : 'sprite'; setDisplayMode(m); localStorage.setItem('bismarck_display_mode', m) }}
+            className={`px-2 py-1 text-xs rounded border ${displayMode === 'sprite' ? 'bg-indigo-700 border-indigo-500 text-indigo-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
+            title="切换算子/小人显示"
+          >
+            {displayMode === 'sprite' ? 'Q版小人' : '方块算子'}
+          </button>
         </div>
       </header>
 
@@ -598,12 +628,15 @@ export default function App() {
             highlightedHexes={highlightedHexes}
             selectedHex={selectedHex}
             showGermanPositions={isGermanPhase || aiSide === 'german'}
+            transportRevealedHex={gameState.transportRevealedHex}
             onHexClick={handleHexClick}
             mapScale={calibration?.scale}
             mapOffX={calibration?.offX}
             mapOffY={calibration?.offY}
             tokenScale={tokenScale}
             zoom={mapZoom}
+            selectedShip={selectedShip}
+            displayMode={displayMode}
           />
         </div>
 
@@ -716,7 +749,7 @@ export default function App() {
       {showTransport && (
         <TransportDialog attackers={getTransportAttackersForUI()} onAttack={handleTransportAttack} onSkip={handleSkipTransport} />
       )}
-      {gameState.gameOver && <VictoryScreen gameState={gameState} onNewGame={handleNewGame} onShowLog={() => setShowLog(true)} />}
+      {gameState.gameOver && <VictoryScreen gameState={gameState} onNewGame={handleNewGame} onShowLog={() => setShowLog(true)} onExportTensor={handleExportTensor} />}
       <GameLogPanel log={log} visible={showLog} onToggle={() => setShowLog(!showLog)} />
 
       {/* 调试终端 */}

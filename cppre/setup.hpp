@@ -35,7 +35,7 @@ inline std::vector<ShipState> createInitialGermanShips() {
 
 inline std::vector<ShipState> createInitialBritishTokens() {
     std::vector<ShipState> tokens;
-    for (const auto& def : ALL_BRITISH_TOKENS) {
+    for (const auto& def : getAllBritishTokens()) {
         tokens.push_back(createShipState(def));
     }
     return tokens;
@@ -53,6 +53,7 @@ inline GameState createGameState() {
     s.combatPending = false;
     s.transportPending = false;
     s.germanPositionPublic = false;
+    s.transportRevealedHex = std::nullopt;
     s.gameOver = false;
     s.winner = std::nullopt;
     return s;

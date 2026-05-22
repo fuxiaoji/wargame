@@ -133,8 +133,8 @@ inline const std::vector<std::string> GERMAN_START_HEXES = {"A5", "A6", "B7"};
 
 /** 运输航路格 */
 inline const std::unordered_set<std::string> SEA_ROUTE_HEXES = {
-    "D2", "D3", "C4", "C5",  // 大西洋航路
-    "E4", "E5"               // 非洲航路
+    "D2", "D3", "C4", "C3", "D5", "E1",  // 大西洋航路
+    "F4", "E4", "E5"                            // 非洲航路
 };
 
 /** 港口格 */

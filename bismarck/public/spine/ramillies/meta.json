@@ -1,0 +1,11 @@
+{
+  "shipId": "ramillies",
+  "name": "复仇(代替拉米伊)",
+  "spineId": "fuchou",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "fuchou.atlas",
+    "texture": "fuchou.png",
+    "skel": "fuchou.skel"
+  }
+}

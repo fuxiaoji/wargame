@@ -99,9 +99,14 @@ struct GameState {
     // 本回合德军位置是否公开 (伪装鉴定失败后)
     bool germanPositionPublic;
 
+    // 伪装鉴定失败需要跟随德军的伪装算子 ID
+    std::unordered_set<std::string> failedDummies;
+
     // 本回合已移动过的舰船
-    // 使用 std::set<std::string> 表示 Set<string>
-    std::unordered_set<std::string> movedThisTurn; // 简化：用 vector 替代 set
+    std::unordered_set<std::string> movedThisTurn;
+
+    // 运输攻击信号泄露暴露的位置（英军移动阶段可见）
+    std::optional<std::string> transportRevealedHex;
 
     // 终局
     bool gameOver;

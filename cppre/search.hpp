@@ -44,7 +44,7 @@ inline SearchResult checkCoLocationSearch(GameState& state) {
 
         for (auto& bShip : state.britishShips) {
             if (bShip.steps <= 0) continue;
-            if (bShip.def.isDummy) continue;
+            // 伪装算子也要参与同格索敌——规则 6.0："英军"包括伪装
 
             auto bPosIt = state.britishPositions.find(bShip.def.id);
             if (bPosIt == state.britishPositions.end()) continue;

@@ -1,0 +1,11 @@
+{
+  "shipId": "norfolk",
+  "name": "诺福克",
+  "spineId": "nuofuke",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "nuofuke.atlas",
+    "texture": "nuofuke.png",
+    "skel": "nuofuke.skel"
+  }
+}

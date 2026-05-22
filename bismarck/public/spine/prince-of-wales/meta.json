@@ -1,0 +1,11 @@
+{
+  "shipId": "prince-of-wales",
+  "name": "威尔士亲王",
+  "spineId": "weiershiqinwang",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "weiershiqinwang.atlas",
+    "texture": "weiershiqinwang.png",
+    "skel": "weiershiqinwang.skel"
+  }
+}

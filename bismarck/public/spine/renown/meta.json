@@ -1,0 +1,11 @@
+{
+  "shipId": "renown",
+  "name": "声望",
+  "spineId": "shengwang",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "shengwang.atlas",
+    "texture": "shengwang.png",
+    "skel": "shengwang.skel"
+  }
+}

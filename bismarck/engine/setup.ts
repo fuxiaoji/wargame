@@ -14,7 +14,7 @@ export const BRITISH_FIXED_POSITIONS: Record<string, string[]> = {
   'F4': ['renown', 'ark-royal'],
   'F1': ['ramillies'],
 }
-
+  
 /** 获取所有固定位置的舰船 ID */
 export function getFixedBritishShipIds(): Set<string> {
   const ids = new Set<string>()
@@ -58,6 +58,8 @@ export function createGameState(_rng?: Randomizer): GameState {
     transportPending: false,
 
     germanPositionPublic: false,
+    failedDummies: new Set(),
+    transportRevealedHex: null,
 
     gameOver: false,
     winner: null,

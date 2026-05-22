@@ -1,0 +1,11 @@
+{
+  "shipId": "prinz-eugen",
+  "name": "欧根亲王",
+  "spineId": "ougen",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "ougen.atlas",
+    "texture": "ougen.png",
+    "skel": "ougen.skel"
+  }
+}

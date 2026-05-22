@@ -162,10 +162,12 @@ export const SUFFOLK: ShipDef = {
 
 // ========== 伪装算子 ==========
 
+const DUMMY_NAMES = ['回声号', '伊卡洛斯号', '爱斯基摩人号', '命运女神号']
+
 function makeDummy(index: number): ShipDef {
   return {
     id: `dummy-${index}`,
-    name: `伪装算子 ${index}`,
+    name: DUMMY_NAMES[index - 1] || `伪装算子 ${index}`,
     side: 'british',
     attack: 0,
     defense: 0,

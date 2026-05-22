@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Spine Test</title></head>
+<body>
+<h1>Spine Render Test</h1>
+<div id="status">Loading...</div>
+<canvas id="c" width="400" height="400" style="border:2px solid red;"></canvas>
+<script src="/spine-runtime/spine-core.js"></script>
+<script src="/spine-runtime/spine-canvas.js"></script>
+<script>
+(async () => {
+  const status = document.getElementById('status');
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const renderer = new spine.canvas.SkeletonRenderer(ctx);
+
+  // Load assets manually
+  const basePath = '/spine/bismarck/';
+  const spineId = 'bisimai';
+
+  // Fetch atlas text
+  status.textContent = 'Loading atlas...';
+  const atlasText = await fetch(basePath + spineId + '.atlas').then(r => r.text());
+
+  // Load image
+  status.textContent = 'Loading image...';
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.crossOrigin = 'anonymous';
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = basePath + spineId + '.png';
+  });
+
+  // Create texture atlas
+  status.textContent = 'Creating atlas...';
+  const atlas = new spine.TextureAtlas(atlasText, (path) => {
+    const texture = new spine.canvas.CanvasTexture(img);
+    return texture;
+  });
+
+  status.textContent = `Atlas pages: ${atlas.pages.length}, regions: ${atlas.regions.length}`;
+  console.log('Page[0]:', atlas.pages[0].name, atlas.pages[0].width, atlas.pages[0].height);
+  console.log('Page[0].texture:', atlas.pages[0].texture);
+
+  // Load binary
+  status.textContent = 'Loading skeleton...';
+  const skelData = await fetch(basePath + spineId + '.skel').then(r => r.arrayBuffer());
+
+  const attachmentLoader = new spine.AtlasAttachmentLoader(atlas);
+  const binary = new spine.SkeletonBinary(attachmentLoader);
+  binary.scale = 1;
+  const skeletonData = binary.readSkeletonData(new Uint8Array(skelData));
+
+  status.textContent = `Skeleton: ${skeletonData.bones.length} bones, ${skeletonData.slots.length} slots, ${skeletonData.animations.length} anims`;
+  console.log('Animations:', skeletonData.animations.map(a => a.name));
+  console.log('Slots:', skeletonData.slots.map(s => s.name + ' -> ' + s.boneData.name + ' attach=' + s.attachmentName));
+
+  // Create skeleton
+  const skeleton = new spine.Skeleton(skeletonData);
+  skeleton.scaleX = 0.5;
+  skeleton.scaleY = 0.5;
+  skeleton.x = 200;
+  skeleton.y = 300;
+  skeleton.setToSetupPose();
+
+  const animData = new spine.AnimationStateData(skeletonData);
+  animData.defaultMix = 0.2;
+  const animState = new spine.AnimationState(animData);
+  animState.setAnimation(0, 'normal', true);
+
+  // Debug: draw default skin attachments
+  console.log('Default skin:', skeletonData.defaultSkin);
+  if (skeletonData.defaultSkin) {
+    console.log('Skin attachments:', skeletonData.defaultSkin.attachments);
+    for (const slotIdx in skeletonData.defaultSkin.attachments) {
+      console.log('Slot', slotIdx, ':', skeletonData.defaultSkin.attachments[slotIdx]);
+    }
+  }
+
+  // Check first slot
+  const firstSlot = skeleton.slots[0];
+  if (firstSlot) {
+    console.log('First slot:', firstSlot.data.name, 'attachment:', firstSlot.attachment);
+    if (firstSlot.attachment) {
+      console.log('Attachment type:', firstSlot.attachment.constructor.name);
+      console.log('Attachment region:', firstSlot.attachment.region);
+      if (firstSlot.attachment.region) {
+        console.log('Region texture:', firstSlot.attachment.region.texture);
+        if (firstSlot.attachment.region.texture) {
+          console.log('Texture image:', firstSlot.attachment.region.texture.getImage());
+        }
+      }
+    }
+  }
+
+  // Render loop
+  let lastTime = performance.now();
+  function tick() {
+    const now = performance.now();
+    const delta = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
+
+    ctx.clearRect(0, 0, 400, 400);
+    animState.update(delta);
+    animState.apply(skeleton);
+    skeleton.updateWorldTransform();
+    renderer.draw(skeleton);
+    requestAnimationFrame(tick);
+  }
+  status.textContent = 'Rendering!';
+  tick();
+})();
+</script>
+</body>
+</html>
+echo "Test page written"

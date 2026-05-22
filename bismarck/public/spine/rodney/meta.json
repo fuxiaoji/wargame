@@ -1,0 +1,11 @@
+{
+  "shipId": "rodney",
+  "name": "罗德尼",
+  "spineId": "luodeni",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "luodeni.atlas",
+    "texture": "luodeni.png",
+    "skel": "luodeni.skel"
+  }
+}

@@ -79,8 +79,14 @@ export interface GameState {
   // 本回合德军位置是否公开 (伪装鉴定失败后)
   germanPositionPublic: boolean
 
+  // 伪装鉴定失败需要跟随德军的伪装算子 ID
+  failedDummies: Set<string>
+
   // 本回合已移动过的舰船
   movedThisTurn: Set<string>
+
+  // 运输攻击信号泄露暴露的位置（英军移动阶段可见）
+  transportRevealedHex: string | null
 
   // 终局
   gameOver: boolean

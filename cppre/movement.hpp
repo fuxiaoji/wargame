@@ -28,21 +28,21 @@ std::vector<std::string> getReachableLabels(HexCoord from, int maxSteps) {
     while (!queue.empty()) {
         auto [current, steps] = queue.front();
         queue.pop();
-        if (steps >= maxSteps) continue; // 到边界，不再扩展
-        
-        auto labelOpt = hexToLabel(current);
-        if (steps > 0 && labelOpt) { // 起始点不算在内
-            result.push_back(*labelOpt);
+
+        // 当前节点加入结果（起点的 steps=0 不加）
+        if (steps > 0) {
+            auto labelOpt = hexToLabel(current);
+            if (labelOpt) result.push_back(*labelOpt);
         }
+
+        if (steps >= maxSteps) continue; // 到边界，不再扩展
+
         for (const auto& nb : hexNeighbors(current)) {
-            auto nbLabelOpt = hexToLabel(nb);
-            if (!nbLabelOpt) continue; // 无效坐标
-            const std::string& nbLabel = *nbLabelOpt;
-            if (visited.count(nbLabel) > 0) continue; // 已访问
-            if (isLand(nb)) continue; // 陆地不可通行
-            if (isBlocked(current, nb)) continue; // 被阻断
-            
-            visited.insert(nbLabel);
+            if (!isValidCoord(nb) || isLand(nb)) continue;
+            if (isBlocked(current, nb)) continue;
+            std::string key = std::to_string(nb.q) + "," + std::to_string(nb.r);
+            if (visited.count(key)) continue;
+            visited.insert(key);
             queue.push({nb, steps + 1});
         }
     }

@@ -1,0 +1,11 @@
+{
+  "shipId": "hood",
+  "name": "胡德",
+  "spineId": "hude",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "hude.atlas",
+    "texture": "hude.png",
+    "skel": "hude.skel"
+  }
+}

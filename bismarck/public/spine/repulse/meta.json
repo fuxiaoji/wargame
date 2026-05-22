@@ -1,0 +1,11 @@
+{
+  "shipId": "repulse",
+  "name": "反击",
+  "spineId": "fanji",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "fanji.atlas",
+    "texture": "fanji.png",
+    "skel": "fanji.skel"
+  }
+}

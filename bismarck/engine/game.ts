@@ -168,18 +168,18 @@ export class BismarckGame {
       return { ok: false, error: '当前不是德军移动阶段' }
     }
 
-    // 鉴定失败 → 伪装算子跟随德军移动
+    // 伪装鉴定失败 → 只有鉴定失败的那些伪装跟随俾斯麦 (规则 6.2)
     if (this.state.germanPositionPublic) {
-      for (const bShip of this.state.britishShips) {
-        if (bShip.def.isDummy && bShip.steps > 0) {
-          // 找到俾斯麦的位置，伪装跟随
-          const bismarckPos = this.state.germanPositions.get('bismarck')
-          if (bismarckPos) {
+      const bismarckPos = this.state.germanPositions.get('bismarck')
+      if (bismarckPos && this.state.failedDummies.size > 0) {
+        for (const bShip of this.state.britishShips) {
+          if (this.state.failedDummies.has(bShip.def.id) && bShip.steps > 0) {
             this.state.britishPositions.set(bShip.def.id, bismarckPos)
-            this.L('move', `伪装算子 ${bShip.def.name} 跟随德军移动至 ${hexToLabel(bismarckPos)}`)
           }
         }
       }
+      this.state.germanPositionPublic = false
+      this.state.failedDummies = new Set()
     }
 
     // 翻回所有英军算子 (5.0)
@@ -228,9 +228,9 @@ export class BismarckGame {
     if (this.state.phase !== 'british-move') {
       return { ok: false, error: '当前不是英军移动阶段' }
     }
-    // 每回合重置，需要重新索敌定位俾斯麦
-    this.state.bismarckFound = false
+    // 注意：bismarckFound 一旦为 true 就不再清除——规则 5.1，发现后所有英军永久解锁
     this.state.combatPending = false
+    this.state.transportRevealedHex = null  // 标记已在英军移动阶段展示过，清除
     this.state.phase = 'british-search'
     return { ok: true }
   }
@@ -242,10 +242,9 @@ export class BismarckGame {
     const result = checkCoLocationSearch(this.state)
     if (result.type === 'co-locate') {
       this.state.bismarckFound = true
-      this.state.combatPending = true
       this.L('search', `同格索敌: 发现德军在 ${result.germanLabel}!`)
 
-      // 6.2 伪装算子鉴定: 检查该格是否有英军伪装算子被翻开
+      // 6.2 伪装算子鉴定: 先处理所有被翻开的伪装算子
       for (const bShip of result.revealedBritish ?? []) {
         if (bShip.def.isDummy) {
           const idResult = checkDummyIdentification(this.state, bShip, this.rng)
@@ -255,9 +254,18 @@ export class BismarckGame {
             this.L('search', `伪装鉴定: ${bShip.def.name} 鉴定成功，移除`)
           } else {
             this.state.germanPositionPublic = true
+            this.state.failedDummies.add(bShip.def.id)
             this.L('search', `伪装鉴定: ${bShip.def.name} 鉴定失败，德军下回合位置公开`)
           }
         }
+      }
+
+      // 只有同格存在非伪装、未沉没的英军真船时才进入战斗
+      const hasRealCombat = result.revealedBritish.some(
+        s => !s.def.isDummy && s.steps > 0
+      )
+      if (hasRealCombat) {
+        this.state.combatPending = true
       }
     } else {
       this.L('search', '同格索敌: 未发现德军')
@@ -373,9 +381,11 @@ export class BismarckGame {
     }
     const result = attackTransport(this.state, ship, this.rng)
     this.L('transport', result.description)
-
+    // 信号泄露：记录暴露位置 + 激活所有英军战舰
     if (result.positionRevealed) {
-      this.state.germanPositionPublic = true
+      const pos = this.state.germanPositions.get(shipId)
+      if (pos) this.state.transportRevealedHex = hexToLabel(pos)
+      this.state.bismarckFound = true  // 英军获知德军位置，所有战舰解锁
     }
 
     // 攻击后进入回合结束
@@ -407,6 +417,7 @@ export class BismarckGame {
     this.state.turn++
     this.state.combatPending = false
     this.state.transportPending = false
+    // transportRevealedHex 不清除——保留到英军移动阶段让玩家看到
     this.state.phase = 'german-move'
   }
 

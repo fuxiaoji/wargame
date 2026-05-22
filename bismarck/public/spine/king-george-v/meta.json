@@ -1,0 +1,11 @@
+{
+  "shipId": "king-george-v",
+  "name": "英王乔治五世",
+  "spineId": "qiaozhiwushi",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "qiaozhiwushi.atlas",
+    "texture": "qiaozhiwushi.png",
+    "skel": "qiaozhiwushi.skel"
+  }
+}

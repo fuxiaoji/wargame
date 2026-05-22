@@ -1,0 +1,11 @@
+{
+  "shipId": "ark-royal",
+  "name": "皇家方舟",
+  "spineId": "huangjiafangzhou",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "huangjiafangzhou.atlas",
+    "texture": "huangjiafangzhou.png",
+    "skel": "huangjiafangzhou.skel"
+  }
+}

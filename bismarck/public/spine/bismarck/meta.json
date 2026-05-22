@@ -1,0 +1,11 @@
+{
+  "shipId": "bismarck",
+  "name": "俾斯麦",
+  "spineId": "bisimai",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "bisimai.atlas",
+    "texture": "bisimai.png",
+    "skel": "bisimai.skel"
+  }
+}

@@ -5,6 +5,7 @@ import { hexToLabel } from './map'
 import { getGermanReachableLabels, getBritishReachableLabels, getShipSpeed } from './movement'
 import { getAirSearchTargets } from './search'
 import { getTransportAttackers } from './transport'
+import { canMoveBeforeDetection } from './units'
 import { GERMAN_START_HEXES } from './map'
 import { getBritishSetupLabels } from './setup'
 
@@ -61,6 +62,7 @@ export class BismarckEnv {
     lines.push(`德军VP:${s.vp.german}(需6) 英军VP:${s.vp.british}`)
     if (s.bismarckFound) lines.push('⚠ 俾斯麦位置已暴露!')
     if (s.germanPositionPublic) lines.push('⚠ 德军位置本回合公开!')
+    if (s.transportRevealedHex) lines.push(`📡 信号泄露: 上回合德军曾在 ${s.transportRevealedHex}`)
     lines.push('')
 
     // 阶段提示
@@ -203,43 +205,69 @@ export class BismarckEnv {
     }
 
     if (s.phase === 'german-move') {
+      // 逐艘轮询：找出下一艘未动的德军船
+      let allMoved = true
       for (const ship of s.germanShips) {
         if (ship.steps <= 0) continue
+        if (s.movedThisTurn.has(ship.def.id)) continue
+        allMoved = false
         const pos = s.germanPositions.get(ship.def.id)
         if (!pos) continue
+        const curLabel = hexToLabel(pos) ?? ''
         const reachable = getGermanReachableLabels(ship, pos)
-        for (const target of reachable.slice(0, 8)) {
+        // 不动选项
+        actions.push({
+          id: nextId++, type: 'move',
+          label: `${ship.def.name} → 不动(${curLabel})`,
+          params: { shipId: ship.def.id, targetLabel: curLabel }
+        })
+        for (const target of reachable) {
+          if (target === curLabel) continue
           actions.push({
             id: nextId++, type: 'move',
             label: `${ship.def.name} → ${target}`,
             params: { shipId: ship.def.id, targetLabel: target }
           })
         }
+        break // 只显示当前这艘船
       }
-      actions.push({ id: nextId++, type: 'finish-phase', label: '德军移动完成' })
+      if (allMoved) actions.push({ id: nextId++, type: 'finish-phase', label: '德军移动完成' })
     }
 
     if (s.phase === 'british-move') {
+      // 逐艘轮询：找出下一艘可动且未动的英军船
+      let allMoved = true
       for (const ship of s.britishShips) {
         if (ship.steps <= 0) continue
+        if (s.movedThisTurn.has(ship.def.id)) continue
+        if (!s.bismarckFound && !canMoveBeforeDetection(ship.def)) continue
+        allMoved = false
         const pos = s.britishPositions.get(ship.def.id)
         if (!pos) continue
+        const curLabel = hexToLabel(pos) ?? ''
         const reachable = getBritishReachableLabels(s, ship, pos)
-        for (const target of reachable.slice(0, 8)) {
+        actions.push({
+          id: nextId++, type: 'move',
+          label: `${ship.def.name} → 不动(${curLabel})`,
+          params: { shipId: ship.def.id, targetLabel: curLabel }
+        })
+        for (const target of reachable) {
+          if (target === curLabel) continue
           actions.push({
             id: nextId++, type: 'move',
             label: `${ship.def.name} → ${target}`,
             params: { shipId: ship.def.id, targetLabel: target }
           })
         }
+        break
       }
-      actions.push({ id: nextId++, type: 'finish-phase', label: '英军移动完成' })
+      if (allMoved) actions.push({ id: nextId++, type: 'finish-phase', label: '英军移动完成' })
     }
 
     if (s.phase === 'british-search') {
-      actions.push({ id: nextId++, type: 'finish-phase', label: '执行同格索敌' })
+      // 航空索敌优先执行（在同格索敌之前）
       const arkRoyal = s.britishShips.find(sh => sh.def.id === 'ark-royal' && sh.steps > 0)
-      if (arkRoyal && !s.bismarckFound) {
+      if (arkRoyal) {
         const pos = s.britishPositions.get('ark-royal')
         if (pos) {
           for (const label of getAirSearchTargets(s, pos)) {
@@ -247,6 +275,7 @@ export class BismarckEnv {
           }
         }
       }
+      actions.push({ id: nextId++, type: 'finish-phase', label: '执行同格索敌' })
       if (!s.combatPending) {
         actions.push({ id: nextId++, type: 'finish-phase', label: '索敌完成' })
       }
@@ -295,11 +324,8 @@ export class BismarckEnv {
         if (this.game.state.phase === 'german-move') this.game.finishGermanMove()
         else if (this.game.state.phase === 'british-move') this.game.finishBritishMove()
         else if (this.game.state.phase === 'british-search') {
-          if (this.game.state.combatPending) this.game.finishSearch()
-          else {
-            this.game.doSearch()
-            this.game.finishSearch()
-          }
+          this.game.doSearch()   // 始终执行同格索敌（处理伪装鉴定）
+          this.game.finishSearch()
         } else if (this.game.state.phase === 'setup-british') {
           this.game.finishSetup()
         } else if (this.game.state.phase === 'transport-attack') this.game.skipTransportAttack()

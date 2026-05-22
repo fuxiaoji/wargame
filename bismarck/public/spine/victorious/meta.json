@@ -1,0 +1,11 @@
+{
+  "shipId": "victorious",
+  "name": "胜利",
+  "spineId": "shengli",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "shengli.atlas",
+    "texture": "shengli.png",
+    "skel": "shengli.skel"
+  }
+}

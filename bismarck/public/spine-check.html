@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Spine Check</title></head>
+<body>
+<h1>Spine Conversion Test</h1>
+<pre id="log"></pre>
+<script type="module">
+import { AssetManager } from '/node_modules/.vite/deps/@esotericsoftware_spine-canvas.js?v=fix';
+import { AtlasAttachmentLoader, SkeletonBinary } from '/node_modules/.vite/deps/@esotericsoftware_spine-core.js?v=fix';
+
+const log = document.getElementById('log');
+function print(msg) { log.textContent += msg + '\n'; }
+
+async function test(name, spineId) {
+  const base = '/spine/' + name + '/';
+  const mgr = new AssetManager(base);
+  try {
+    const [atlas, skel] = await Promise.all([
+      mgr.loadTextureAtlasAsync(spineId + '.atlas'),
+      mgr.loadBinaryAsync(spineId + '.skel'),
+    ]);
+    const loader = new AtlasAttachmentLoader(atlas);
+    const reader = new SkeletonBinary(loader);
+    const data = reader.readSkeletonData(skel);
+    print(name + ': ' + data.bones.length + 'B ' + data.slots.length + 'S ' + data.animations.length + 'A');
+    if (data.animations.length > 0) {
+      print('  anims: ' + data.animations.map(a => a.name).slice(0,8).join(', '));
+    }
+    if (data.bones.length > 0) {
+      print('  bones: ' + data.bones.slice(0,5).map(b => b.name).join(', '));
+    }
+  } catch(e) {
+    print(name + ': ERROR - ' + e.message.slice(0,100));
+  }
+}
+
+const ships = [
+  ['bismarck','bisimai'], ['prinz-eugen','ougen'], ['hood','hude'],
+  ['prince-of-wales','weiershiqinwang'], ['ark-royal','huangjiafangzhou'],
+  ['king-george-v','qiaozhiwushi'], ['rodney','luodeni'], ['renown','shengwang'],
+  ['repulse','fanji'], ['victorious','shengli'], ['ramillies','fuchou'],
+  ['norfolk','nuofuke'], ['suffolk','safuke'],
+  ['dummy-1','huisheng'], ['dummy-2','yikaluosi'], ['dummy-3','aisijimo'], ['dummy-4','mingyunnvshen'],
+];
+
+for (const [name, id] of ships) {
+  await test(name, id);
+}
+print('\nDone!');
+</script>
+</body></html>
+echo "Test page created"

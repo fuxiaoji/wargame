@@ -1,0 +1,11 @@
+{
+  "shipId": "suffolk",
+  "name": "萨福克",
+  "spineId": "safuke",
+  "spineVersion": "3.6.52",
+  "files": {
+    "atlas": "safuke.atlas",
+    "texture": "safuke.png",
+    "skel": "safuke.skel"
+  }
+}

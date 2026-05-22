@@ -22,7 +22,7 @@ export function checkCoLocationSearch(state: GameState): SearchResult {
 
     for (const bShip of state.britishShips) {
       if (bShip.steps <= 0) continue
-      if (bShip.def.isDummy) continue
+      // 伪装算子也要参与同格索敌——规则 6.0："英军"包括伪装
       const bPos = state.britishPositions.get(bShip.def.id)
       if (!bPos) continue
 
