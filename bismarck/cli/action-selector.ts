@@ -51,13 +51,23 @@ export function createLLMHighSelector(apiKey: string, model = 'deepseek-v4-pro',
   }
 }
 
-// ===== 状态机选择器 (占位，下一步实现) =====
+// ===== 状态机选择器 =====
 export function createStateMachineSelector(): ActionSelector {
+  // 动态导入避免循环依赖
+  let ai: any = null
   return {
     name: 'state-machine',
-    async selectAction(_obs) {
-      // TODO: 实现启发式状态机
-      return { actionId: null, rawResponse: 'state-machine: not implemented' }
+    async selectAction(obs) {
+      if (!ai) {
+        const { createStateMachineAI } = await import('./state-machine')
+        ai = createStateMachineAI()
+      }
+      const raw = (obs as any).raw
+      const state = raw || obs
+      const result = state.activePlayer === 'german' || obs.activePlayer === 'german'
+        ? ai.selectGerman({ ...obs, raw: raw || obs })
+        : ai.selectBritish({ ...obs, raw: raw || obs })
+      return result
     }
   }
 }

@@ -80,6 +80,7 @@ export interface GameObservation {
   actions: { id: number; type: string; label: string; params?: any }[]
   gameOver: boolean
   winner: string | null
+  raw?: any  // 完整 GameState，供状态机使用
 }
 
 export interface ActionSelector {
