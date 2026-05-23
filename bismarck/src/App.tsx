@@ -26,7 +26,7 @@ function loadCalibration() {
   return { scale: parseFloat(s), offX: parseFloat(x), offY: parseFloat(y) }
 }
 
-type AISide = null | 'german' | 'british'
+type AISide = null | 'german' | 'british' | 'sm-german' | 'sm-british'
 
 const MAP_DESC = `地图(字母A-F从上到下,数字1-8从左到右,奇数列B/D/F左偏):
 A列: A3 A4 A5 A6
@@ -130,6 +130,10 @@ export default function App() {
 
   // AI 模式
   const [aiSide, setAiSide] = useState<AISide>(null)
+  const [smVersion, setSmVersion] = useState(() => localStorage.getItem('bismarck_sm_ver') || 'training_v1')
+  const [smGen, setSmGen] = useState(() => parseInt(localStorage.getItem('bismarck_sm_gen') || '19'))
+  const [smGerIdx, setSmGerIdx] = useState(() => parseInt(localStorage.getItem('bismarck_sm_ger') || '0'))
+  const [smBritIdx, setSmBritIdx] = useState(() => parseInt(localStorage.getItem('bismarck_sm_brit') || '0'))
   const [showAIThinking, setShowAIThinking] = useState(true)
   const [aiThinking, setAIThinking] = useState('')
   const [showAIConfig, setShowAIConfig] = useState(false)
@@ -194,7 +198,9 @@ export default function App() {
     || gameState.phase === 'transport-attack'
 
   const currentPlayer: 'german' | 'british' = isGermanPhase ? 'german' : 'british'
-  const isAITurn = aiSide !== null && currentPlayer === aiSide
+  const isAITurn = aiSide !== null && (
+    currentPlayer === (aiSide === 'sm-german' ? 'german' : aiSide === 'sm-british' ? 'british' : aiSide)
+  )
 
   // ===== AI 自动回合 =====
   useEffect(() => {
@@ -204,9 +210,52 @@ export default function App() {
       aiRunningRef.current = true
       addDebug('═══ AI回合启动 ═══', '#fbbf24')
 
-      // 用真实 game 对象构建 AI 观察
+      // === 状态机快速路径 (不调LLM) ===
+      const isSM = aiSide === 'sm-german' || aiSide === 'sm-british'
+      if (isSM) {
+        const smEnv = new BismarckEnv(); (smEnv as any).game = game
+        // 动态加载个体
+        const { listIndividuals, createStateMachineAI } = await import('../cli/ai-loader')
+        const info = listIndividuals(smVersion, smGen)
+        const gerW = info.german[smGerIdx]?.weights
+        const ai = createStateMachineAI(gerW)
+        addDebug(`状态机: ${smVersion} Gen${smGen} 德#${smGerIdx}(${info.german[smGerIdx]?.style||'?'}) 英#${smBritIdx}(${info.british[smBritIdx]?.style||'?'})`, '#a78bfa')
+
+        let smSteps = 0, smStuck = 0, smLast = ''
+        while (!gameState.gameOver && smSteps < 300) {
+          const obs = smEnv.getObservation(); (obs as any).raw = game.state
+          if (obs.phase !== 'setup-british' && obs.actions.length === 0) break
+
+          if (obs.phase === smLast) smStuck++; else { smStuck = 0; smLast = obs.phase }
+          if (smStuck > 15) {
+            const f = obs.actions.find(a => a.type === 'finish-phase')
+            if (f) { smEnv.step(f); smStuck = 0; continue }
+          }
+
+          if (obs.phase === 'setup-british') {
+            const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+            const s = game.state
+            for (const sh of s.britishShips) if (sh.def.isDummy && !s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
+            const hs = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
+            for (const sh of s.britishShips) if (!s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, hs[Math.floor(Math.random()*hs.length)])
+            game.finishSetup(); refresh(); smSteps++; continue
+          }
+
+          const result = obs.activePlayer === 'german' ? ai.selectGerman(obs) : ai.selectBritish(obs)
+          if (result.actionId != null) {
+            const a = obs.actions.find(x => x.id === result.actionId)
+            if (a) smEnv.step(a); else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
+          } else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
+          smSteps++; refresh()
+        }
+        aiRunningRef.current = false
+        addDebug('状态机回合结束', '#a78bfa')
+        return
+      }
+
+      // === LLM路径 ===
       const env = new BismarckEnv()
-      ;(env as any).game = game  // 注入真实 game
+      ;(env as any).game = game
       const obs = env.getObservation()
 
       const sysPrompt = RULES_SHORT + (currentPlayer === 'german' ? '\n你是德军。' : '\n你是英军。')
@@ -634,10 +683,31 @@ export default function App() {
             className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs"
           >
             <option value="none">👥 双人对战</option>
-            <option value="german">🤖 AI德军</option>
-            <option value="british">🤖 AI英军</option>
+            <option value="german">🤖 AI德军(LLM)</option>
+            <option value="british">🤖 AI英军(LLM)</option>
+            <option value="sm-german">🧠 状态机德军</option>
+            <option value="sm-british">🧠 状态机英军</option>
           </select>
-          {aiSide && (
+          {/* 状态机个体选择 */}
+          {(aiSide === 'sm-german' || aiSide === 'sm-british') && (
+            <>
+              <select value={smVersion} onChange={e => { setSmVersion(e.target.value); localStorage.setItem('bismarck_sm_ver', e.target.value) }}
+                className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">
+                <option value="training_v1">V1(KL)</option>
+                <option value="training_v2">V2(MAP)</option>
+              </select>
+              <span className="text-xs text-slate-500">Gen</span>
+              <input value={smGen} onChange={e => { setSmGen(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_gen', e.target.value) }}
+                className="w-10 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs text-center" />
+              <span className="text-xs text-slate-500">德#</span>
+              <input value={smGerIdx} onChange={e => { setSmGerIdx(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_ger', e.target.value) }}
+                className="w-8 bg-slate-800 border border-red-600 rounded px-1 py-0.5 text-xs text-center" />
+              <span className="text-xs text-slate-500">英#</span>
+              <input value={smBritIdx} onChange={e => { setSmBritIdx(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_brit', e.target.value) }}
+                className="w-8 bg-slate-800 border border-blue-600 rounded px-1 py-0.5 text-xs text-center" />
+            </>
+          )}
+          {aiSide && aiSide !== 'sm-german' && aiSide !== 'sm-british' && (
             <>
               <select value={aiLevel} onChange={e => { setAiLevel(e.target.value as 'low'|'high'); localStorage.setItem('bismarck_ai_level', e.target.value) }}
                 className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs" title="AI级别: 低级=快, 高级=推理">
