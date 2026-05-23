@@ -60,8 +60,7 @@ export class BismarckEnv {
     // 阶段上下文
     lines.push(`=== 第${s.turn}/18回合 | ${phaseName(s.phase)} ===`)
     lines.push(`德军VP:${s.vp.german}(需6) 英军VP:${s.vp.british}`)
-    if (s.bismarckFound) lines.push('⚠ 俾斯麦位置已暴露!')
-    if (s.germanPositionPublic) lines.push('⚠ 德军位置本回合公开!')
+    if (s.germanPositionPublic) lines.push('⚠ 德军位置本回合公开!（伪装鉴定失败）')
     if (s.transportRevealedHex) lines.push(`📡 信号泄露: 上回合德军曾在 ${s.transportRevealedHex}`)
     lines.push('')
 
@@ -89,7 +88,7 @@ export class BismarckEnv {
       const pos = s.britishPositions.get(ship.def.id)
       if (pos) addHex(hexToLabel(pos) ?? '?', ship.def.name)
     }
-    if (player === 'german' || s.bismarckFound || s.germanPositionPublic) {
+    if (player === 'german' || s.germanPositionPublic) {
       for (const ship of s.germanShips) {
         if (ship.steps <= 0) continue
         const pos = s.germanPositions.get(ship.def.id)
@@ -121,10 +120,8 @@ export class BismarckEnv {
         const label = pos ? hexToLabel(pos) : '?'
         if (ship.revealed) {
           lines.push(shipLine(ship, label ?? '??'))
-        } else if (ship.def.isDummy) {
-          lines.push(`  伪装算子 [${label}]`)
         } else {
-          lines.push(`  ? [背面] ${label}`)
+          lines.push(`  背面算子 [${label}]`)  // 德军看不到身份
         }
       }
     } else {
@@ -136,8 +133,10 @@ export class BismarckEnv {
         lines.push(shipLine(ship, label ?? '??'))
       }
       lines.push('')
-      if (s.bismarckFound || s.germanPositionPublic) {
-        lines.push('== 德军舰队 (已知) ==')
+      // bismarckFound 只用于解锁英军移动，不暴露当前位置
+      // 当前位置仅在 germanPositionPublic(伪装鉴定失败)时公开
+      if (s.germanPositionPublic) {
+        lines.push('== 德军舰队 (公开) ==')
         for (const ship of s.germanShips) {
           if (ship.steps <= 0) continue
           const pos = s.germanPositions.get(ship.def.id)
@@ -147,20 +146,33 @@ export class BismarckEnv {
       } else {
         lines.push('== 德军舰队 ==')
         lines.push('  位置未知。需通过索敌发现。')
+        if (s.bismarckFound) lines.push('  注意: 英军已发现过俾斯麦，所有战舰解锁可移动。')
         lines.push('  德军起始格: A5/A6/B7 之一')
       }
     }
     lines.push('')
 
-    // setup-british 特殊格式
+    // setup-british 特殊格式：末尾显示坐标指令，不显示编号列表
     if (s.phase === 'setup-british') {
       const unplaced = s.britishShips.filter(sh => !s.britishPositions.has(sh.def.id))
       if (unplaced.length > 0) {
+        const labels = getBritishSetupLabels()
         lines.push('')
-        lines.push('📝 请在回复中用格式列出所有初设:')
-        lines.push(`   (${unplaced.map(s => s.def.name).join(',格号)(')},格号)`)
-        lines.push('   然后回复 [1] 确认。')
-        lines.push('')
+        lines.push(`📝 需放置 ${unplaced.length} 个算子: ${unplaced.map(s=>s.def.name).join(', ')}`)
+        lines.push(`   可选格号: ${labels.join(', ')}`)
+        lines.push(`--- 请直接回复坐标 (不要编号) ---`)
+        lines.push(`   ⚠️ 必须使用上面的精确算子名称！伪装算子只能叫"伪装算子1/2/3/4"`)
+        lines.push(`   格式: (舰名,格号)(舰名,格号)...`)
+        lines.push(`   例如: (胡德号,E7)(诺福克号,D1)(伪装算子1,E3)(伪装算子2,F2)`)
+        return {
+          text: lines.join('\n'),
+          activePlayer: player,
+          phase: s.phase,
+          actions: this.getActions(),
+          gameOver: s.gameOver,
+          winner: s.winner,
+          raw: s,
+        }
       }
     }
 
@@ -197,8 +209,8 @@ export class BismarckEnv {
     if (s.phase === 'setup-british') {
       const unplaced = s.britishShips.filter(sh => !s.britishPositions.has(sh.def.id))
       if (unplaced.length > 0) {
-        // 一次性提供所有初始位置，格式: (舰名,格号)(舰名,格号)...
-        actions.push({ id: nextId++, type: 'move', label: '发送初设并开始游戏', params: {} })
+        // 不生成编号动作——LLM 应直接回复坐标格式
+        // 观察文本末尾会提示格式
       } else {
         actions.push({ id: nextId++, type: 'finish-phase', label: '布阵完成，开始游戏' })
       }

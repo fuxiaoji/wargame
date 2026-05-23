@@ -9,60 +9,42 @@ const PHASE_MAP: Record<string, number> = {
   'setup-german': 0, 'setup-british': 1, 'german-move': 2, 'british-move': 3,
   'british-search': 4, 'combat': 5, 'transport-attack': 6, 'game-over': 7,
 }
-const COL = ['A','B','C','D','E','F']
-const MAGIC = 0x42534D42
 
-function encodeActionRecord(rec: ActionRecord): ArrayBuffer {
-  const buf = new ArrayBuffer(8)
-  const dv = new DataView(buf)
-  dv.setUint8(0, rec.step_index)
-  dv.setUint8(1, rec.phase)
-  dv.setUint8(2, rec.side)
-  dv.setUint8(3, rec.action_type)
-  dv.setInt8(4, rec.ship_id ?? 0)
-  dv.setInt8(5, rec.target_q ?? -1)
-  dv.setInt8(6, rec.target_r ?? -1)
-  dv.setInt8(7, 0)
-  return buf
-}
-
-function buildStateBin(stateBuf: Float32Array): ArrayBuffer {
-  const hdr = new ArrayBuffer(20)
-  const dv = new DataView(hdr)
-  dv.setUint32(0, MAGIC, true)  // LE
-  dv.setInt32(4, T, true)
-  dv.setInt32(8, 128, true)
-  dv.setInt32(12, 8, true)
-  dv.setInt32(16, 6, true)
-  const data = new Uint8Array(stateBuf.buffer)
-  const out = new Uint8Array(20 + data.length)
-  out.set(new Uint8Array(hdr), 0)
-  out.set(data, 20)
-  return out.buffer
-}
-
-function buildActionBin(actions: ActionRecord[]): ArrayBuffer {
-  const parts = actions.map(encodeActionRecord)
-  const total = parts.reduce((s, p) => s + p.byteLength, 0)
-  const out = new Uint8Array(total)
-  let off = 0
-  for (const p of parts) {
-    out.set(new Uint8Array(p), off)
-    off += p.byteLength
+async function uploadGame(gameType: string, gameId: string,
+  stateBuf: Float32Array, actions: ActionRecord[], result: GameLogResult,
+  humanLog?: string
+) {
+  const stateBytes = new Uint8Array(stateBuf.buffer)
+  const actBuf = new ArrayBuffer(actions.length * 8)
+  const actView = new DataView(actBuf)
+  actions.forEach((a, i) => {
+    const o = i * 8
+    actView.setUint8(o, a.step_index); actView.setUint8(o+1, a.phase)
+    actView.setUint8(o+2, a.side); actView.setUint8(o+3, a.action_type)
+    actView.setInt8(o+4, a.ship_id ?? 0); actView.setInt8(o+5, a.target_q ?? -1)
+    actView.setInt8(o+6, a.target_r ?? -1)
+  })
+  // base64 编码
+  const toB64 = (bytes: Uint8Array) => {
+    let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return btoa(bin)
   }
-  return out.buffer
+  try {
+    await fetch('http://localhost:3001/api/save-game', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        gameType, gameId,
+        stateBase64: toB64(stateBytes),
+        actionBase64: toB64(new Uint8Array(actBuf)),
+        result,
+        humanLog,
+      }),
+    })
+  } catch { /* server may be offline */ }
 }
 
-function downloadBlob(data: ArrayBuffer, filename: string) {
-  const blob = new Blob([data], { type: 'application/octet-stream' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url; a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-export function useTensorLogger() {
+export function useTensorLogger(gameType = 'human-vs-ai') {
   const stateBufRef = useRef(new Float32Array(T * SLICE))
   const actionsRef = useRef<ActionRecord[]>([])
   const stepIdxRef = useRef(0)
@@ -115,7 +97,7 @@ export function useTensorLogger() {
   }, [])
 
   // 终局导出
-  const exportLogs = useCallback((state: GameState) => {
+  const exportLogs = useCallback((state: GameState, humanLog?: string) => {
     activeRef.current = false
     // 补零
     const zeroSlice = new Float32Array(SLICE)
@@ -137,14 +119,8 @@ export function useTensorLogger() {
       brest_reached: state.victoryReason.includes('布雷斯特'),
     }
 
-    // 下载 state.bin
-    downloadBlob(buildStateBin(stateBufRef.current), `${gameId}_state.bin`)
-    // 下载 action.bin
-    downloadBlob(buildActionBin(actionsRef.current), `${gameId}_action.bin`)
-    // 下载 result.json
-    const json = JSON.stringify({ game_id: gameId, ...result }, null, 2)
-    downloadBlob(new TextEncoder().encode(json).buffer, `${gameId}_result.json`)
-  }, [])
+    uploadGame(gameType, gameId, stateBufRef.current, actionsRef.current, result, humanLog)
+  }, [gameType])
 
   return { recordStep, startLogging, exportLogs, stepCount: stepIdxRef.current }
 }

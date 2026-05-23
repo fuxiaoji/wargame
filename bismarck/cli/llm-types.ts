@@ -1,0 +1,76 @@
+/** LLM 对战共享类型与提示词 */
+
+// ===== 系统提示词 =====
+export const SYS_GERMAN = `你是俾斯麦号战役的德军指挥官。目标：6VP立即胜利，或回合结束时占据F7(布雷斯特)且VP领先英军。
+
+## 德军
+俾斯麦号[攻4/防6/4Step/速2(受损→1)] 欧根亲王号[攻2/防5/2Step/速2]
+隐藏移动。初始可选A5/A6/B7，同一格出发。每船每回合可移动或不动。
+
+## 英军(你可见的)
+固定初始: C6(乔治五世/反击/胜利) D6(罗德尼) F4(声望/皇家方舟) F1(拉米伊)
+发现德军前仅胡德/威尔士亲王/伪装可移动。发现后全部解锁。
+皇家方舟号可航空索敌。2Step受损后攻击-2。
+英军算子对你显示为"背面算子"，你看不到身份。
+
+## 地图
+A3-A6|B2-B7|C1-C7|D1-D8|E1-E7|F1-F7。奇数列B/D/F左偏。
+港口: F7(布雷斯特) D8(斯卡帕湾) 航路: D2 D3 C3 C4 D5 E1 E4 E5
+阻断: D6-D7 E5-E6 E6-D7 E6-F7 E6-E7
+
+## 回合顺序: 德军移动→英军移动→索敌→战斗/运输
+## 战斗: 航空优先→按攻降序。攻N投N个D6≥防命中1Step=1VP
+## 伪装鉴定(6.2): 翻开伪装→D6。速2≤4移除速1≤2移除。失败→下回合位置公开+伪装跟随
+## 运输攻击: 航路上未战斗可攻击。D6:1信号泄露,2无,3=1VP,4=1VP+泄露,5=2VP,6=2VP+泄露`
+
+export const SYS_BRITISH = `你是俾斯麦号战役的英军指挥官。目标：击沉俾斯麦号，或撑过18回合。
+
+## 英军
+胡德[攻4/防6/2Step] 威尔士[攻3/防6/2Step] 方舟[攻1/防5/2Step/可航空索敌]
+乔治五世[攻3/防6/2Step] 罗德尼[攻3/防6/2Step] 声望[攻2/防5/2Step]
+反击[攻2/防5/2Step] 胜利[攻1/防5/2Step] 拉米伊[攻3/防6/2Step]
+诺福克[攻2/防5/1Step] 萨福克[攻2/防5/1Step] 伪装×4[攻0/防0/1Step/速3]
+固定: C6(乔治五世/反击/胜利) D6(罗德尼) F4(声望/方舟) F1(拉米伊)
+发现前仅胡德/威尔士/伪装可动。发现后全解锁。2Step受损攻击-2。
+
+## 德军
+俾斯麦[攻4/防6/4Step/速2(损→1)] 欧根[攻2/防5/2Step/速2]。隐藏移动，A5/A6/B7出发。
+
+## 地图
+A3-A6|B2-B7|C1-C7|D1-D8|E1-E7|F1-F7。奇数列B/D/F左偏。
+港口: F7(布雷斯特) D8(斯卡帕湾) 航路: D2 D3 C3 C4 D5 E1 E4 E5
+阻断: D6-D7 E5-E6 E6-D7 E6-F7 E6-E7
+
+## 回合顺序: 德军移动→英军移动→索敌→战斗/运输
+## 索敌: 同格→德军告知格号。航空(6.1):方舟可搜相邻格。伪装鉴定(6.2):翻开伪装→D6≤4(速2)/≤2(速1)移除。失败→下回合德军公开+伪装跟随。
+## 战斗: 航空优先→按攻降序。攻N投N个D6≥防命中=1VP
+## 运输: 航路攻击。D6:1信号泄露,2无,3=1VP,4=1VP+泄露,5=2VP,6=2VP+泄露`
+
+// ===== 格式指令 =====
+export const FORMAT_LOW = `\n\n---\n只回复一个数字。不要任何其他文字。`
+
+export const FORMAT_HIGH = `\n\n---\n先简要分析当前局势(2-3句话)，然后回复选择哪个动作编号。格式: 分析...\n最终选择: [N]`
+
+// ===== 配置 =====
+export interface LLMConfig {
+  apiKey: string
+  baseUrl: string
+  model: string
+  level: 'low' | 'high'  // low=快/只出数字, high=推理/带分析
+}
+
+// ===== 行动选择器接口 =====
+export interface GameObservation {
+  text: string
+  activePlayer: 'german' | 'british'
+  phase: string
+  actions: { id: number; type: string; label: string; params?: any }[]
+  gameOver: boolean
+  winner: string | null
+}
+
+export interface ActionSelector {
+  name: string
+  /** 返回选中的动作 ID，或 null 表示需要特殊处理(如 setup-british 坐标格式) */
+  selectAction(obs: GameObservation, context?: string): Promise<{ actionId: number | null; rawResponse: string }>
+}

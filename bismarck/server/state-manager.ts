@@ -23,8 +23,8 @@ export interface BattleProgress {
 }
 
 export interface ServerConfig {
-  german: { baseUrl: string; apiKey: string; model: string }
-  british: { baseUrl: string; apiKey: string; model: string }
+  german: { baseUrl: string; apiKey: string; model: string; level?: 'low'|'high' }
+  british: { baseUrl: string; apiKey: string; model: string; level?: 'low'|'high' }
   swapSides: boolean
   parallel: number
 }
@@ -40,8 +40,8 @@ export interface ServerState {
 }
 
 const DEFAULT_CONFIG: ServerConfig = {
-  german: { baseUrl: 'http://localhost:8000/v1', apiKey: 'sk-local', model: 'qwen3' },
-  british: { baseUrl: 'http://localhost:8000/v1', apiKey: 'sk-local', model: 'qwen3' },
+  german: { baseUrl: 'http://localhost:8000/v1', apiKey: 'sk-local', model: 'qwen3', level: 'low' },
+  british: { baseUrl: 'http://localhost:8000/v1', apiKey: 'sk-local', model: 'qwen3', level: 'low' },
   swapSides: false,
   parallel: 4,
 }

@@ -213,21 +213,14 @@ export interface ActionRecord {
   target_q: number; target_r: number
 }
 
-const SHIP_IDS: Record<string, number> = {
-  'bismarck':1,'prinz-eugen':2,'hood':10,'prince-of-wales':11,'ark-royal':12,
-  'king-george-v':13,'rodney':14,'renown':15,'repulse':16,'victorious':17,
-  'ramillies':18,'norfolk':19,'suffolk':20,
-  'dummy-1':30,'dummy-2':31,'dummy-3':32,'dummy-4':33,
-}
-
-function encodeActionRecord(rec: ActionRecord): Buffer {
-  const buf = Buffer.alloc(8)
-  buf.writeUInt8(rec.step_index, 0); buf.writeUInt8(rec.phase, 1)
-  buf.writeUInt8(rec.side, 2); buf.writeUInt8(rec.action_type, 3)
-  buf.writeInt8(rec.ship_id ?? 0, 4)
-  buf.writeInt8(rec.target_q ?? -1, 5)
-  buf.writeInt8(rec.target_r ?? -1, 6)
-  buf.writeInt8(0, 7)
+function encodeActionRecord(rec: ActionRecord): Uint8Array {
+  const buf = new Uint8Array(8)
+  buf[0] = rec.step_index; buf[1] = rec.phase
+  buf[2] = rec.side; buf[3] = rec.action_type
+  buf[4] = (rec.ship_id ?? 0) & 0xff
+  buf[5] = (rec.target_q ?? -1) & 0xff
+  buf[6] = (rec.target_r ?? -1) & 0xff
+  buf[7] = 0
   return buf
 }
 
@@ -243,15 +236,22 @@ export function writeGameLog(dir: string, gameId: string,
   const gameDir = path.join(dir, gameId)
   fs.mkdirSync(gameDir, { recursive: true })
 
-  const hdr = Buffer.alloc(20)
-  hdr.writeUInt32LE(MAGIC, 0)
-  hdr.writeInt32LE(T, 4); hdr.writeInt32LE(C, 8)
-  hdr.writeInt32LE(H, 12); hdr.writeInt32LE(W, 16)
-  fs.writeFileSync(path.join(gameDir, 'state.bin'),
-    Buffer.concat([hdr, Buffer.from(stateBuf.buffer)]))
+  // header: 20 bytes (4B magic + 4×4B dims)
+  const hdr = new ArrayBuffer(20)
+  const dv = new DataView(hdr)
+  dv.setUint32(0, MAGIC, true); dv.setInt32(4, T, true); dv.setInt32(8, C, true)
+  dv.setInt32(12, H, true); dv.setInt32(16, W, true)
+  const stateData = new Uint8Array(stateBuf.buffer)
+  const stateOut = new Uint8Array(20 + stateData.length)
+  stateOut.set(new Uint8Array(hdr), 0); stateOut.set(stateData, 20)
+  fs.writeFileSync(path.join(gameDir, 'state.bin'), stateOut)
 
-  fs.writeFileSync(path.join(gameDir, 'action.bin'),
-    Buffer.concat(actions.map(encodeActionRecord)))
+  const actParts = actions.map(encodeActionRecord)
+  const actTotal = actParts.reduce((s, p) => s + p.length, 0)
+  const actOut = new Uint8Array(actTotal)
+  let off = 0
+  for (const p of actParts) { actOut.set(p, off); off += p.length }
+  fs.writeFileSync(path.join(gameDir, 'action.bin'), actOut)
 
   fs.writeFileSync(path.join(gameDir, 'result.json'),
     JSON.stringify({ game_id: gameId, ...result }, null, 2))

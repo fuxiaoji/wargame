@@ -6,37 +6,74 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import { createServer } from 'http'
 import { StateManager, BattleResult } from './state-manager'
+import * as fs from 'fs'
 
 // ----- 动态导入游戏引擎 (避开 Vite tsconfig 限制) -----
 async function runBattle(config: {
-  german: { baseUrl: string; apiKey: string; model: string }
-  british: { baseUrl: string; apiKey: string; model: string }
+  german: { baseUrl: string; apiKey: string; model: string; level?: 'low'|'high' }
+  british: { baseUrl: string; apiKey: string; model: string; level?: 'low'|'high' }
   gameId: string
   onProgress: (p: { turn: number; phase: string; germanVp: number; britishVp: number; stepCount: number }) => void
 }): Promise<BattleResult> {
   const { BismarckEnv } = await import('../engine/env')
-  const { LLMClient } = await import('../cli/llm-client')
+  const { createLLMClient, extractActionId } = await import('../cli/llm-client')
+  const { SYS_GERMAN, SYS_BRITISH } = await import('../cli/llm-types')
 
   const env = new BismarckEnv()
-  const germanLLM = new LLMClient({ ...config.german, temperature: 0.3, maxTokens: 500 })
-  const britishLLM = new LLMClient({ ...config.british, temperature: 0.3, maxTokens: 500 })
+  const gerLvl = config.german.level === 'high' ? 'high' : 'low'
+  const britLvl = config.british.level === 'high' ? 'high' : 'low'
+  const germanLLM = createLLMClient({ apiKey: config.german.apiKey, baseUrl: config.german.baseUrl, model: config.german.model, level: gerLvl })
+  const britishLLM = createLLMClient({ apiKey: config.british.apiKey, baseUrl: config.british.baseUrl, model: config.british.model, level: britLvl })
 
-  let stepCount = 0
+  let stepCount = 0, stuck = 0, lastPhase = ''
 
   while (!env.game.state.gameOver && stepCount < 800) {
     const obs = env.getObservation()
+    if (obs.actions.length === 0) break
     const player = obs.activePlayer
     const llm = player === 'german' ? germanLLM : britishLLM
-    const sysPrompt = player === 'german' ? GERMAN_SYS : BRITISH_SYS
+    const sysPrompt = player === 'german' ? SYS_GERMAN : SYS_BRITISH
 
-    // 调用 LLM
+    // 卡死检测
+    if (obs.phase === lastPhase) stuck++
+    else { stuck = 0; lastPhase = obs.phase }
+    if (stuck > 20) {
+      const f = obs.actions.find(a => a.type === 'finish-phase')
+      if (f) { env.step(f); stuck = 0; continue }
+    }
+
+    // === setup-british: 自动放伪装 + LLM选真船位置 ===
+    if (obs.phase === 'setup-british') {
+      // 自动放伪装
+      const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+      for (const sh of env.game.state.britishShips)
+        if (sh.def.isDummy && !env.game.state.britishPositions.has(sh.def.id))
+          env.game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
+
+      let raw = ''
+      try { raw = (await llm.chat(sysPrompt, obs.text)).content } catch { /* skip LLM error */ }
+
+      const re = /\(([^,)]+),\s*([A-F]\d)\)/g; let m
+      while ((m = re.exec(raw)) !== null) {
+        const sh = env.game.state.britishShips.find(x =>
+          !x.def.isDummy && !env.game.state.britishPositions.has(x.def.id) &&
+          (x.def.name===m![1].trim() || x.def.name.includes(m![1].trim()) || m![1].trim().includes(x.def.name.slice(0,2))))
+        if (sh) env.game.placeBritishToken(sh.def.id, m[2])
+      }
+      const left = env.game.state.britishShips.filter(x => !env.game.state.britishPositions.has(x.def.id))
+      if (left.length > 0) {
+        const hs = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
+        for (const sh of left) env.game.placeBritishToken(sh.def.id, hs[Math.floor(Math.random()*hs.length)])
+      }
+      env.game.finishSetup()
+      stepCount++; continue
+    }
+
     let actionId: number | null = null
     try {
       const res = await llm.chat(sysPrompt, obs.text)
-      const m = res.content.match(/\[?(\d+)\]?/)
-      actionId = m ? parseInt(m[1]) : null
+      actionId = extractActionId(res.content)
     } catch (e: any) {
-      // LLM 调用失败，跳过这局
       return {
         gameId: config.gameId,
         winner: null, germanVp: 0, britishVp: 0, turns: 0,
@@ -49,7 +86,9 @@ async function runBattle(config: {
     if (actionId !== null) {
       const action = obs.actions.find(a => a.id === actionId)
       if (action) env.step(action)
-      else if (obs.actions.length > 0) env.step(obs.actions[0])  // fallback
+      else if (obs.actions.length > 0) env.step(obs.actions[0])
+    } else if (obs.actions.length > 0) {
+      env.step(obs.actions[0])  // 无法解析时 fallback
     }
 
     stepCount++
@@ -91,7 +130,45 @@ const BRITISH_SYS = `你是俾斯麦号战役的英军指挥官。目标: 击沉
 // ===== WebSocket 服务器 =====
 
 export function startServer(port = 3001) {
-  const httpServer = createServer()
+  const httpServer = createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+
+    if (req.method === 'POST' && req.url === '/api/save-game') {
+      let body = ''
+      req.on('data', c => body += c)
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body)
+          const gameType = data.gameType || 'unknown'
+          const gameId = data.gameId || ('game-' + Date.now())
+          const dir = `../deeplearn/data/${gameType}/${gameId}`
+          fs.mkdirSync(dir, { recursive: true })
+
+          if (data.stateBase64) {
+            const hdr = Buffer.alloc(20)
+            hdr.writeUInt32LE(0x42534D42, 0); hdr.writeInt32LE(73, 4); hdr.writeInt32LE(128, 8)
+            hdr.writeInt32LE(8, 12); hdr.writeInt32LE(6, 16)
+            const body = Buffer.from(data.stateBase64, 'base64')
+            fs.writeFileSync(`${dir}/state.bin`, Buffer.concat([hdr, body]))
+          }
+          if (data.actionBase64) fs.writeFileSync(`${dir}/action.bin`, Buffer.from(data.actionBase64, 'base64'))
+          if (data.result) fs.writeFileSync(`${dir}/result.json`, JSON.stringify(data.result, null, 2))
+          if (data.humanLog) fs.writeFileSync(`${dir}/human_log.txt`, data.humanLog)
+
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, dir }))
+          console.log(`💾 游戏数据已保存: ${dir}`)
+        } catch (e: any) {
+          res.writeHead(500); res.end(JSON.stringify({ error: e.message }))
+        }
+      })
+      return
+    }
+    res.writeHead(404); res.end('not found')
+  })
   const wss = new WebSocketServer({ server: httpServer })
   const sm = new StateManager()
 

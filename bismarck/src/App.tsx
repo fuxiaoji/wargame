@@ -79,12 +79,12 @@ export default function App() {
     refresh,
   } = useGame(log)
 
-  const tensorLog = useTensorLogger()
+  const tensorLog = useTensorLogger('human-vs-ai')
   const prevStateRef = useRef<string>('')
 
   // 新游戏开始时重置日志
   useEffect(() => { if (gameState) tensorLog.startLogging(gameState) }, [])
-  // 每次状态变化时记录一步
+  // 每次状态变化时记录一步 (gameState 是可变对象，引用不变，用具体字段做依赖)
   useEffect(() => {
     if (!gameState || gameState.gameOver || isAITurn) return
     const key = `${gameState.turn}|${gameState.phase}|${gameState.phaseStep}`
@@ -92,17 +92,40 @@ export default function App() {
     prevStateRef.current = key
     const player = (gameState.phase === 'setup-german' || gameState.phase === 'german-move' || gameState.phase === 'transport-attack') ? 'german' : 'british'
     tensorLog.recordStep(gameState, player, 0)
-  }, [gameState])
+  }, [gameState?.turn, gameState?.phase, gameState?.phaseStep])
+
+  const buildHumanLog = useCallback(() => {
+    const entries = log.entries
+    const lines: string[] = []
+    for (const e of entries) {
+      const t = `T${e.turn}`.padEnd(4)
+      const p = (e.phase || '').padEnd(16)
+      lines.push(`[${t} ${p}] ${e.message}`)
+    }
+    return lines.join('\n')
+  }, [log])
 
   const handleExportTensor = useCallback(() => {
-    if (gameState) tensorLog.exportLogs(gameState)
-  }, [gameState, tensorLog])
+    if (gameState) tensorLog.exportLogs(gameState, buildHumanLog())
+  }, [gameState, tensorLog, buildHumanLog])
+
+  // 游戏结束时自动上传训练数据
+  useEffect(() => {
+    if (gameState?.gameOver) tensorLog.exportLogs(gameState, buildHumanLog())
+  }, [gameState?.gameOver, gameState?.turn])
 
   const [combatResult, setCombatResult] = useState<CombatResult | null>(null)
   const [showTransport, setShowTransport] = useState(false)
   const [phaseMessage, setPhaseMessage] = useState('')
   const [showLog, setShowLog] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
+
+  // 自动弹出运输攻击对话框
+  useEffect(() => {
+    if (gameState?.phase === 'transport-attack' && gameState.transportPending && !isAITurn) {
+      setShowTransport(true)
+    }
+  }, [gameState?.phase, gameState?.transportPending])
 
   // AI 模式
   const [aiSide, setAiSide] = useState<AISide>(null)
@@ -112,6 +135,7 @@ export default function App() {
   const [showDebug, setShowDebug] = useState(false)
   const [debugLines, setDebugLines] = useState<{ time: string; text: string; color: string }[]>([])
   const [aiReasoning, setAIReasoning] = useState('')  // AI思考过程展示
+  const [aiLevel, setAiLevel] = useState<'low'|'high'>(() => (localStorage.getItem('bismarck_ai_level') as 'low'|'high') || 'low')
   const [reasoningEffort, setReasoningEffort] = useState(() => localStorage.getItem('bismarck_reasoning_effort') || 'low')
   const [tokenScale, setTokenScale] = useState(() => parseFloat(localStorage.getItem('bismarck_token_scale') || '1'))
   const [mapZoom, setMapZoom] = useState(() => parseFloat(localStorage.getItem('bismarck_map_zoom') || '1'))
@@ -196,6 +220,7 @@ export default function App() {
 
       while (attempts < maxAttempts && !gameState.gameOver) {
         const currentObs = env.getObservation()
+
         if (currentObs.phase !== localPhase) {
           addDebug(`阶段变化: ${localPhase} → ${currentObs.phase}`, '#60a5fa')
           localPhase = currentObs.phase
@@ -211,6 +236,51 @@ export default function App() {
         if (!stillAITurn || gameState.gameOver) {
           addDebug('AI回合结束', '#fbbf24')
           break
+        }
+
+        // setup-british: LLM 直接回复坐标，actions 可为空
+        if (currentObs.phase === 'setup-british') {
+          const s = game.state
+          // 自动放伪装
+          const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+          for (const sh of s.britishShips)
+            if (sh.def.isDummy && !s.britishPositions.has(sh.def.id))
+              placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
+          // LLM 决定真船
+          try {
+            const key = aiKey; const model = aiModel
+            if (key) {
+              const apiPath = aiUrl.includes('deepseek') ? '/api/deepseek' : '/api/minimax'
+              const res = await fetch(`${apiPath}/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+                body: JSON.stringify({ model, temperature: 0.3, max_tokens: 200, stream: false,
+                  messages: [{ role: 'system', content: sysPrompt }, { role: 'user', content: currentObs.text }] }),
+              })
+              if (res.ok) {
+                const data = await res.json()
+                const raw = data.choices?.[0]?.message?.content || ''
+                addDebug(`  LLM布置回复: "${raw.slice(0,150)}"`, '#a78bfa')
+                const re = /\(([^,)]+),\s*([A-F]\d)\)/g; let m
+                while ((m = re.exec(raw)) !== null) {
+                  const sh = s.britishShips.find(x => !x.def.isDummy && !s.britishPositions.has(x.def.id) &&
+                    (x.def.name===m![1].trim() || x.def.name.includes(m![1].trim()) || m![1].trim().includes(x.def.name.slice(0,2))))
+                  if (sh) { placeBritishToken(sh.def.id, m[2]); addDebug(`  📍 ${sh.def.name} → ${m[2]}`, '#4ade80') }
+                }
+              }
+            }
+          } catch {}
+          // LLM没放的真船自动放
+          const hs = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
+          for (const sh of s.britishShips)
+            if (!s.britishPositions.has(sh.def.id))
+              placeBritishToken(sh.def.id, hs[Math.floor(Math.random()*hs.length)])
+          finishSetup()
+          addDebug('📋 英军布阵完成', '#4ade80')
+          await new Promise(r => setTimeout(r, 200))
+          refresh()
+          attempts = 0
+          continue
         }
 
         const actionCount = currentObs.actions.length
@@ -237,12 +307,13 @@ export default function App() {
             const apiPath = aiUrl.includes('deepseek') ? '/api/deepseek' : '/api/minimax'
 
             const t0 = Date.now()
-            addDebug(`→ 调用 ${model} (流式)...`, '#a78bfa')
-            // 构建消息：首次调用附带地图图片
+            addDebug(`→ 调用 ${model}...`, '#a78bfa')
             const messages: any[] = [{ role: 'system', content: sysPrompt }]
-            if (!mapSentRef.current && mapBase64Ref.current) {
+            // 仅非 DeepSeek 的模型发送地图图片 (DeepSeek 不支持 image_url)
+            const canSendImage = !aiUrl.includes('deepseek') && !mapSentRef.current && mapBase64Ref.current
+            if (canSendImage) {
               mapSentRef.current = true
-              addDebug('  📷 附带地图图片 (base64)', '#60a5fa')
+              addDebug('  📷 附带地图图片', '#60a5fa')
               messages.push({
                 role: 'user',
                 content: [
@@ -254,13 +325,16 @@ export default function App() {
               messages.push({ role: 'user', content: currentObs.text })
             }
 
+            const isHigh = aiLevel === 'high'
             const res = await fetch(`${apiPath}/chat/completions`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
               body: JSON.stringify({
-                model, temperature: 0.3, max_tokens: 1000, stream: true,
-                reasoning_effort: reasoningEffort,
-                messages,
+                model, temperature: isHigh ? 0.3 : 0.1,
+                max_tokens: isHigh ? 500 : 10,
+                stream: isHigh,
+                ...(isHigh ? { reasoning_effort: reasoningEffort } : {}),
+                messages: [...messages, ...(isHigh ? [] : [{ role: 'user' as const, content: '\n\n---\n只回复一个数字。不要任何其他文字。' }])],
               }),
             })
 
@@ -269,52 +343,41 @@ export default function App() {
               throw new Error(`API ${res.status}: ${errText.slice(0, 100)}`)
             }
 
-            // 解析 SSE 流——累积批量输出避免逐字刷屏
-            const reader = res.body!.getReader()
-            const decoder = new TextDecoder()
             let rawAnswer = ''
-            let reasoningBuf = ''
-            let buffer = ''
-            let lastFlush = Date.now()
 
-            const flushReasoning = () => {
-              if (reasoningBuf) {
-                addDebug(`  💭 ${reasoningBuf}`, '#7c3aed')
-                reasoningBuf = ''
+            if (isHigh) {
+              // 高级模式: 流式解析 + 推理过程展示
+              const reader = res.body!.getReader()
+              const decoder = new TextDecoder()
+              let reasoningBuf = '', buffer = '', lastFlush = Date.now()
+              const flush = () => {
+                if (reasoningBuf) { addDebug(`  💭 ${reasoningBuf}`, '#7c3aed'); reasoningBuf = '' }
               }
-            }
-
-            while (true) {
-              const { done, value } = await reader.read()
-              if (done) break
-              buffer += decoder.decode(value, { stream: true })
-              const lines = buffer.split('\n')
-              buffer = lines.pop() || ''
-
-              for (const line of lines) {
-                if (!line.startsWith('data: ')) continue
-                const jsonStr = line.slice(6)
-                if (jsonStr === '[DONE]') continue
-                try {
-                  const chunk = JSON.parse(jsonStr)
-                  const delta = chunk.choices?.[0]?.delta
-                  if (delta?.reasoning_content) {
-                    reasoningBuf += delta.reasoning_content
-                    setAIReasoning(prev => prev + delta.reasoning_content)
-                    // 每 500ms 或累积 30 字刷新一次
-                    if (Date.now() - lastFlush > 500 || reasoningBuf.length > 30) {
-                      flushReasoning()
-                      lastFlush = Date.now()
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                buffer += decoder.decode(value, { stream: true })
+                const lines = buffer.split('\n'); buffer = lines.pop() || ''
+                for (const line of lines) {
+                  if (!line.startsWith('data: ')) continue
+                  if (line.slice(6) === '[DONE]') continue
+                  try {
+                    const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta
+                    if (delta?.reasoning_content) {
+                      reasoningBuf += delta.reasoning_content
+                      setAIReasoning(prev => prev + delta.reasoning_content)
+                      if (Date.now() - lastFlush > 500 || reasoningBuf.length > 30) { flush(); lastFlush = Date.now() }
                     }
-                  }
-                  if (delta?.content) {
-                    flushReasoning()  // 开始输出答案前先刷掉推理
-                    rawAnswer += delta.content
-                  }
-                } catch { /* skip malformed */ }
+                    if (delta?.content) { flush(); rawAnswer += delta.content }
+                  } catch {}
+                }
               }
+              flush()
+            } else {
+              // 低级模式: 非流式，只出数字
+              const data = await res.json()
+              rawAnswer = data.choices?.[0]?.message?.content || ''
             }
-            flushReasoning()  // 最后刷掉剩余
 
             // 汇总答案
             if (rawAnswer) {
@@ -322,33 +385,31 @@ export default function App() {
             }
 
             const latency = Date.now() - t0
-            // 无 content 时用推理内容
-            if (!rawAnswer && reasoningBuf) {
-              rawAnswer = reasoningBuf
-              addDebug(`  ⚠ 无最终回复，用推理内容`, '#fbbf24')
-            }
 
-            // setup-british 特殊处理：解析 (舰名,格号) 格式
+            // setup-british: LLM回复坐标格式，解析放置
             if (currentObs.phase === 'setup-british' && rawAnswer) {
-              const placementRegex = /\(([^,)]+),\s*([A-G]\d)\)/g
-              let match
-              let placed = 0
+              const placementRegex = /\(([^,)]+),\s*([A-F]\d)\)/g
+              let match, placed = 0
               while ((match = placementRegex.exec(rawAnswer)) !== null) {
                 const shipName = match[1].trim()
                 const hexLabel = match[2]
                 const ship = gameState.britishShips.find(s =>
-                  s.def.name === shipName || s.def.name.includes(shipName) || shipName.includes(s.def.name.slice(0, 2))
+                  !gameState.britishPositions.has(s.def.id) &&
+                  (s.def.name === shipName || s.def.name.includes(shipName) || shipName.includes(s.def.name.slice(0, 2)))
                 )
-                if (ship && !gameState.britishPositions.has(ship.def.id)) {
-                  placeBritishToken(ship.def.id, hexLabel)
-                  addDebug(`  📍 ${ship.def.name} → ${hexLabel}`, '#4ade80')
-                  placed++
-                }
+                if (ship) { placeBritishToken(ship.def.id, hexLabel); addDebug(`  📍 ${ship.def.name} → ${hexLabel}`, '#4ade80'); placed++ }
               }
-              if (placed > 0) {
-                await new Promise(r => setTimeout(r, 200))
-                refresh()
-              }
+              // LLM没提到的船自动放
+              const hexes = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
+              for (const sh of gameState.britishShips)
+                if (!gameState.britishPositions.has(sh.def.id))
+                  placeBritishToken(sh.def.id, hexes[Math.floor(Math.random()*hexes.length)])
+              finishSetup()
+              addDebug(`📋 布阵完成(${placed}个LLM指定)`, '#4ade80')
+              await new Promise(r => setTimeout(r, 200))
+              refresh()
+              attempts++
+              continue  // 跳过下面的数字解析
             }
 
             const m = rawAnswer.match(/\[?(\d+)\]?/)
@@ -564,18 +625,27 @@ export default function App() {
           </select>
           {aiSide && (
             <>
+              <select value={aiLevel} onChange={e => { setAiLevel(e.target.value as 'low'|'high'); localStorage.setItem('bismarck_ai_level', e.target.value) }}
+                className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs" title="AI级别: 低级=快, 高级=推理">
+                <option value="low">低级AI</option>
+                <option value="high">高级AI</option>
+              </select>
               <button onClick={() => setShowAIConfig(true)}
                 className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 text-indigo-200 text-xs rounded">⚙ API</button>
-              <label className="flex items-center gap-1 text-xs text-slate-400">
-                <input type="checkbox" checked={showAIThinking} onChange={e => setShowAIThinking(e.target.checked)} />
-                思考
-              </label>
-              <select value={reasoningEffort} onChange={e => { setReasoningEffort(e.target.value); localStorage.setItem('bismarck_reasoning_effort', e.target.value) }}
-                className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs w-14" title="推理强度: low=快, high=深">
-                <option value="low">快</option>
-                <option value="medium">中</option>
-                <option value="high">深</option>
-              </select>
+              {aiLevel === 'high' && (
+                <>
+                  <label className="flex items-center gap-1 text-xs text-slate-400">
+                    <input type="checkbox" checked={showAIThinking} onChange={e => setShowAIThinking(e.target.checked)} />
+                    思考
+                  </label>
+                  <select value={reasoningEffort} onChange={e => { setReasoningEffort(e.target.value); localStorage.setItem('bismarck_reasoning_effort', e.target.value) }}
+                    className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs w-14" title="推理强度: low=快, high=深">
+                    <option value="low">快</option>
+                    <option value="medium">中</option>
+                    <option value="high">深</option>
+                  </select>
+                </>
+              )}
               <button onClick={() => setShowDebug(!showDebug)}
                 className={`px-2 py-1 text-xs rounded ${showDebug ? 'bg-green-700 text-green-200' : 'bg-slate-700 text-slate-300'}`}>
                 🖥 调试
@@ -627,7 +697,11 @@ export default function App() {
             gameState={gameState}
             highlightedHexes={highlightedHexes}
             selectedHex={selectedHex}
-            showGermanPositions={isGermanPhase || aiSide === 'german'}
+            showGermanPositions={
+              aiSide === 'british' ||  // 人玩德军 → 始终看己方
+              (aiSide === null && isGermanPhase) ||  // 双人按阶段切换
+              (aiSide === 'german' && gameState.germanPositionPublic)  // 人玩英军 → 仅伪装鉴定失败时
+            }
             transportRevealedHex={gameState.transportRevealedHex}
             onHexClick={handleHexClick}
             mapScale={calibration?.scale}
@@ -745,7 +819,7 @@ export default function App() {
         )}
       </div>
 
-      <CombatDialog result={combatResult} onClose={handleCombatClose} />
+      <CombatDialog result={combatResult} onClose={handleCombatClose} gameState={gameState} displayMode={displayMode} />
       {showTransport && (
         <TransportDialog attackers={getTransportAttackersForUI()} onAttack={handleTransportAttack} onSkip={handleSkipTransport} />
       )}

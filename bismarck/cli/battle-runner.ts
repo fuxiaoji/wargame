@@ -8,16 +8,15 @@
  */
 
 import { BismarckEnv } from '../engine/env'
-import { LLMClient, LLMConfig } from './llm-client'
+import { createLLMClient, extractActionId } from './llm-client'
+import type { LLMConfig } from './llm-types'
 import { GameLog } from '../engine/log'
 import * as fs from 'fs'
 import * as path from 'path'
 
-// ===== 参数解析 =====
-
 interface BattleConfig {
-  german: LLMConfig
-  british: LLMConfig
+  german: LLMConfig & { baseUrl: string }
+  british: LLMConfig & { baseUrl: string }
   games: number
   verbose: boolean
   outputDir: string
@@ -90,7 +89,7 @@ function parseActionId(llmOutput: string): number | null {
 
 // ===== 主循环 =====
 
-async function runOneGame(germanLLM: LLMClient, britishLLM: LLMClient, gameIdx: number, cfg: BattleConfig) {
+async function runOneGame(germanLLM: ReturnType<typeof createLLMClient>, britishLLM: ReturnType<typeof createLLMClient>, gameIdx: number, cfg: BattleConfig) {
   const env = new BismarckEnv()
   let stepCount = 0
 
@@ -111,7 +110,7 @@ async function runOneGame(germanLLM: LLMClient, britishLLM: LLMClient, gameIdx: 
     let actionId: number | null = null
     try {
       const res = await llm.chat(sysPrompt, obs.text)
-      actionId = parseActionId(res.content)
+      actionId = extractActionId(res.content)
       if (cfg.verbose) {
         console.log(`LLM 回复: "${res.content.slice(0, 100)}" → 动作 ${actionId}`)
       }
@@ -169,8 +168,8 @@ async function main() {
   console.log(`英军模型: ${cfg.british.model} @ ${cfg.british.baseUrl}`)
   console.log(`对局数: ${cfg.games}`)
 
-  const germanLLM = new LLMClient(cfg.german)
-  const britishLLM = new LLMClient(cfg.british)
+  const germanLLM = createLLMClient({ ...cfg.german, level: 'low' })
+  const britishLLM = createLLMClient({ ...cfg.british, level: 'low' })
 
   let germanWins = 0, britishWins = 0
   const startTime = Date.now()

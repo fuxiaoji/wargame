@@ -41,6 +41,8 @@ export function Dashboard({ onClose }: DashboardProps) {
   const [britishUrl, setBritishUrl] = useState(() => localStorage.getItem('bismarck_br_url') || 'http://localhost:8000/v1')
   const [britishKey, setBritishKey] = useState(() => localStorage.getItem('bismarck_br_key') || 'sk-local')
   const [britishModel, setBritishModel] = useState(() => localStorage.getItem('bismarck_br_model') || 'qwen3')
+  const [gerLevel, setGerLevel] = useState(() => localStorage.getItem('bismarck_ger_level') || 'low')
+  const [britLevel, setBritLevel] = useState(() => localStorage.getItem('bismarck_brit_level') || 'low')
   const [swapSides, setSwapSides] = useState(() => localStorage.getItem('bismarck_swap') === 'true')
   const [battleCount, setBattleCount] = useState(() => parseInt(localStorage.getItem('bismarck_count') || '100'))
   const [parallel, setParallel] = useState(() => parseInt(localStorage.getItem('bismarck_parallel') || '4'))
@@ -52,8 +54,9 @@ export function Dashboard({ onClose }: DashboardProps) {
     localStorage.setItem('bismarck_server_port', port)
     localStorage.setItem('bismarck_ger_url', germanUrl); localStorage.setItem('bismarck_ger_key', germanKey); localStorage.setItem('bismarck_ger_model', germanModel)
     localStorage.setItem('bismarck_br_url', britishUrl); localStorage.setItem('bismarck_br_key', britishKey); localStorage.setItem('bismarck_br_model', britishModel)
+    localStorage.setItem('bismarck_ger_level', gerLevel); localStorage.setItem('bismarck_brit_level', britLevel)
     localStorage.setItem('bismarck_swap', String(swapSides)); localStorage.setItem('bismarck_count', String(battleCount)); localStorage.setItem('bismarck_parallel', String(parallel))
-  }, [port, germanUrl, germanKey, germanModel, britishUrl, britishKey, britishModel, swapSides, battleCount, parallel])
+  }, [port, germanUrl, germanKey, germanModel, britishUrl, britishKey, britishModel, gerLevel, britLevel, swapSides, battleCount, parallel])
 
   // 稳定的 WebSocket 连接 (不随表单变化重连)
   useEffect(() => {
@@ -103,7 +106,7 @@ export function Dashboard({ onClose }: DashboardProps) {
 
   const handleConfig = () => send({
     type: 'config',
-    config: { german: { baseUrl: germanUrl, apiKey: germanKey, model: germanModel }, british: { baseUrl: britishUrl, apiKey: britishKey, model: britishModel }, swapSides, parallel }
+    config: { german: { baseUrl: germanUrl, apiKey: germanKey, model: germanModel, level: gerLevel }, british: { baseUrl: britishUrl, apiKey: britishKey, model: britishModel, level: britLevel }, swapSides, parallel }
   })
 
   const handleStart = () => { handleConfig(); send({ type: 'start', total: battleCount }) }
@@ -122,6 +125,18 @@ export function Dashboard({ onClose }: DashboardProps) {
         <div className="flex items-center gap-3">
           <span className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`} />
           <span className="text-sm text-slate-400">{connected ? `已连接 :${port}` : '等待连接...'}</span>
+          <span className="text-xs text-slate-500">引擎:</span>
+          <select value={localStorage.getItem('bismarck_engine') || 'ts'} onChange={e => { localStorage.setItem('bismarck_engine', e.target.value); handleConfig() }}
+            className="bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-xs">
+            <option value="ts">TS 引擎</option>
+            <option value="cpp">C++ 引擎</option>
+          </select>
+          <span className="text-xs text-slate-500">张量:</span>
+          <select value={localStorage.getItem('bismarck_export_tensor') || 'yes'} onChange={e => localStorage.setItem('bismarck_export_tensor', e.target.value)}
+            className="bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-xs">
+            <option value="yes">导出</option>
+            <option value="no">不导出</option>
+          </select>
           <input value={port} onChange={e => setPort(e.target.value)} className="w-16 bg-slate-800 border border-slate-600 rounded px-2 py-0.5 text-sm text-center" />
           <button onClick={() => { wsRef.current?.close() }} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded">重连</button>
           <button onClick={onClose} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded">返回游戏</button>
@@ -171,9 +186,25 @@ export function Dashboard({ onClose }: DashboardProps) {
                 <input value={britishModel} onChange={e => setBritishModel(e.target.value)} placeholder="模型名" className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-1.5 text-sm" />
               </div>
             </div>
-            <div className="flex gap-6 mt-3 text-sm">
+            <div className="flex gap-6 mt-3 text-sm flex-wrap items-center">
               <label className="flex items-center gap-2 text-slate-300">
                 <input type="checkbox" checked={swapSides} onChange={e => setSwapSides(e.target.checked)} /> 交替扮演
+              </label>
+              <label className="flex items-center gap-2 text-slate-300">
+                德AI:
+                <select value={gerLevel} onChange={e => { setGerLevel(e.target.value); localStorage.setItem('bismarck_ger_level', e.target.value) }}
+                  className="bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-xs">
+                  <option value="low">低级</option>
+                  <option value="high">高级</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-slate-300">
+                英AI:
+                <select value={britLevel} onChange={e => { setBritLevel(e.target.value); localStorage.setItem('bismarck_brit_level', e.target.value) }}
+                  className="bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-xs">
+                  <option value="low">低级</option>
+                  <option value="high">高级</option>
+                </select>
               </label>
               <label className="flex items-center gap-2 text-slate-300">
                 并发: <input type="number" value={parallel} onChange={e => setParallel(parseInt(e.target.value) || 4)} min={1} max={16} className="w-14 bg-slate-900 border border-slate-600 rounded px-2 py-0.5 text-center" />

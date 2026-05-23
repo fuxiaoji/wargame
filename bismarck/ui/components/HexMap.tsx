@@ -1,8 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { getAllHexCells, hexToLabel } from '../../engine/map'
 import { GameState, ShipState } from '../../engine/types'
-import { SpineManager } from '../spine/SpineManager'
-import { SpineToken, shipAnimEvent } from './SpineToken'
+
 
 interface HexMapProps {
   gameState: GameState
@@ -194,11 +193,9 @@ export function HexMap({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const mapImgRef = useRef<HTMLImageElement | null>(null)
   const [imgLoaded, setImgLoaded] = useState(false)
-  const [spineReady, setSpineReady] = useState(false)
-
-  useEffect(() => { SpineManager.preload().then(() => setSpineReady(true)) }, [])
-
   const hasMap = mapScale !== undefined && mapOffX !== undefined && mapOffY !== undefined
+
+
   useEffect(() => {
     if (!hasMap) return
     const img = new Image()
@@ -268,19 +265,7 @@ export function HexMap({
           onClick={handleClick}
         />
 
-        {/* Spine 动画层 — 仅在 sprite 模式下显示 */}
-        {displayMode === 'sprite' && spineReady && tokens.map((t, idx) => {
-          const ship = [...gameState.britishShips, ...gameState.germanShips].find(s => s.def.id === t.shipId)
-          if (!ship || t.hidden || t.isDummy) return null
-          const isMoving = ship.moveTarget !== null
-          const isDamaged = ship.steps < ship.def.maxSteps && ship.steps > 0
-          const anim = shipAnimEvent(t.shipId, selectedShip, isMoving, isDamaged, gameState.gameOver && ship.def.side === 'british', gameState.gameOver)
-          return <SpineToken key={`spine-${t.shipId}-${idx}`} shipId={t.shipId} px={t.px * zoom} py={t.py * zoom}
-            stackIdx={t.stackIdx} stackTotal={t.stackTotal} anim={anim} hidden={false}
-            tokenScale={tokenScale * zoom} mapW={MAP_W} mapH={MAP_H} />
-        })}
-
-        {/* Chibi PNG 层 — 仅在 sprite 模式下显示 */}
+        {/* Chibi PNG 层 — 回退 */}
         {displayMode === 'sprite' && tokens.map((t, idx) => {
           const ship = [...gameState.britishShips, ...gameState.germanShips].find(s => s.def.id === t.shipId)
           if (!ship || t.hidden) return null
