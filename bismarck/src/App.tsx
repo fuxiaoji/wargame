@@ -233,12 +233,24 @@ export default function App() {
           }
 
           if (obs.phase === 'setup-british') {
-            const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+            // 调用状态机BritishBrain决定真船位置 → 靠近德军出生点
+            const setupRes = ai.selectBritish(obs)
+            const raw = setupRes.rawResponse
+            // 解析坐标格式: (胡德号,B6)(威尔士亲王号,C5)
+            const re = /\(([^,)]+),\s*([A-F]\d)\)/g; let m
             const s = game.state
-            for (const sh of s.britishShips) if (sh.def.isDummy && !s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
-            const hs = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
-            for (const sh of s.britishShips) if (!s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, hs[Math.floor(Math.random()*hs.length)])
-            game.finishSetup(); refresh(); smSteps++; continue
+            while ((m = re.exec(raw)) !== null) {
+              const sh = s.britishShips.find(x => !x.def.isDummy && !s.britishPositions.has(x.def.id) &&
+                (x.def.name === m![1].trim() || x.def.name.includes(m![1].trim()) || m![1].trim().includes(x.def.name.slice(0,2))))
+              if (sh) game.placeBritishToken(sh.def.id, m[2])
+            }
+            // 伪装随机放
+            const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+            for (const sh of s.britishShips)
+              if (!s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
+            const r = game.finishSetup()
+            addDebug(`SM初设: ${r.ok ? '✅完成' : '❌'+r.error} | ${raw.slice(0,60)}`, r.ok ? '#4ade80' : '#ef4444')
+            refresh(); smSteps++; continue
           }
 
           const result = obs.activePlayer === 'german' ? ai.selectGerman(obs) : ai.selectBritish(obs)

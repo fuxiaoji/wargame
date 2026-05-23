@@ -335,13 +335,31 @@ class BritishBrain {
   }
 
   private handleSetup(obs: any, state: GameState) {
-    // 真船放靠近德军出生点
-    const germanZone = ['A5','A6','B7','B6','C6','C7','B5','C5']
+    // 德军出生点可达范围(速2): BFS收集所有2步内可达格
+    const reachable = new Set<string>()
+    const visited = new Set<string>()
+    const queue: {q:number;r:number;d:number}[] = []
+    for (const label of GERMAN_START_HEXES) {
+      const rc = rcOf(label); if (!rc) continue
+      const key = `${rc[1]},${rc[0]}`; if (visited.has(key)) continue
+      visited.add(key); queue.push({q:rc[1],r:rc[0],d:0})
+    }
+    while (queue.length > 0) {
+      const cur = queue.shift()!
+      if (cur.d > 0) reachable.add(`${COL[cur.q]}${cur.r+1}`)
+      if (cur.d >= 2) continue
+      for (const nb of hexNeighbors({q:cur.q,r:cur.r})) {
+        const k = `${nb.q},${nb.r}`
+        if (!visited.has(k)) { visited.add(k); queue.push({q:nb.q,r:nb.r,d:cur.d+1}) }
+      }
+    }
+    // 可达格列表，每格只放一艘真船
+    const hexList = [...reachable].sort(() => Math.random() - 0.5)
     const unplaced = state.britishShips.filter(sh => !sh.def.isDummy && !state.britishPositions.has(sh.def.id))
     const parts: string[] = []
-    for (const sh of unplaced) {
-      const hex = germanZone[Math.floor(Math.random() * Math.min(germanZone.length, 6))]
-      parts.push(`(${sh.def.name},${hex})`)
+    for (let i = 0; i < unplaced.length; i++) {
+      const hex = hexList[i % hexList.length]
+      parts.push(`(${unplaced[i].def.name},${hex})`)
     }
     return { actionId: null, rawResponse: parts.join('') }
   }
