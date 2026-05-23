@@ -215,8 +215,8 @@ export default function App() {
       addDebug(`  提示词预览:\n${preview}`, '#475569')
 
       let localPhase = obs.phase
-      let attempts = 0
-      const maxAttempts = 300  // 增加容限，防止打断AI思考
+      let attempts = 0, sameActionStuck = 0, lastActionType = ''
+      const maxAttempts = 300
 
       while (attempts < maxAttempts && !gameState.gameOver) {
         const currentObs = env.getObservation()
@@ -418,6 +418,19 @@ export default function App() {
             if (actionId !== null) {
               chosenAction = currentObs.actions.find(a => a.id === actionId)
               addDebug(`← #${actionId} ${chosenAction?.label?.slice(0, 40) ?? '?'} (${latency}ms)`, '#4ade80')
+
+              // 同类型动作连续选 5 次 → 强制推进（防航空索敌/移动死循环）
+              if (chosenAction) {
+                if (chosenAction.type === lastActionType) sameActionStuck++
+                else { sameActionStuck = 0; lastActionType = chosenAction.type }
+                if (sameActionStuck >= 5) {
+                  const finish = currentObs.actions.find(a => a.type === 'finish-phase')
+                  if (finish) {
+                    addDebug(`⚡ 同动作${sameActionStuck}次，强制: ${finish.label}`, '#f97316')
+                    chosenAction = finish; sameActionStuck = 0
+                  }
+                }
+              }
             } else {
               addDebug(`← 无法解析动作编号: "${rawAnswer.slice(0, 80)}" (${latency}ms)`, '#ef4444')
             }
