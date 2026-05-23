@@ -101,6 +101,7 @@ struct Heatmap {
 struct GermanBrain {
     Weights w;
     HexCoord lastBismarckPos{0,0}; bool hasLastPos = false;
+    std::string lastStrategy = "rush";  // 供训练统计
 
     int selectAction(const GameState& st, const std::vector<GameAction>& actions, const std::string& phase) {
         if (phase == "setup-german") {
@@ -187,15 +188,15 @@ struct GermanBrain {
 
         std::vector<std::string> strategies{"rush","farm","hunt","hide"};
         int pickedIdx = weightedPick(std::vector<float>(probs.begin(), probs.end()), 0.5f);
-        std::string picked = strategies[pickedIdx];
+        lastStrategy = strategies[pickedIdx];
 
         // 策略修正热力图
-        if (picked == "rush") {
+        if (lastStrategy == "rush") {
             hm.set(6,5, hm.get(6,5)-10);
             for (auto& nb : hexNeighbors(f7)) { auto nl = hexToLabel(nb); if (nl) { auto [r,c]=rcOf(*nl); if (r>=0) hm.set(r,c,hm.get(r,c)-5); } }
-        } else if (picked == "farm") {
+        } else if (lastStrategy == "farm") {
             for (auto& l : {"D2","D3","C3","C4","D5","E1","E4","E5"}) { auto [r,c]=rcOf(l); if (r>=0) hm.set(r,c,hm.get(r,c)-2); }
-        } else if (picked == "hide") {
+        } else if (lastStrategy == "hide") {
             for (auto& sh : st.britishShips) {
                 if (sh.steps <= 0) continue;
                 auto pit = st.britishPositions.find(sh.def.id); if (pit==st.britishPositions.end()) continue;

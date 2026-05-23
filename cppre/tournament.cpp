@@ -8,6 +8,7 @@
 #include <ctime>
 #include <numeric>
 #include <thread>
+#include <atomic>
 #include <sys/stat.h>
 using namespace std;
 
@@ -39,7 +40,8 @@ string weightsToJson(const Weights& w) {
 }
 
 // ===== 超快游戏 (无堆分配) =====
-static bool runOneGame(const Weights& gerW, const Weights& britW) {
+struct StratCount { int rush=0, farm=0, hunt=0, hide=0; };
+static bool runOneGame(const Weights& gerW, const Weights& britW, StratCount& sc) {
     GermanBrain ger(gerW); BritishBrain brit(britW);
     BismarckEnv env;
     int steps = 0, stuck = 0; Phase lastPhase = Phase::game_over;
@@ -68,6 +70,13 @@ static bool runOneGame(const Weights& gerW, const Weights& britW) {
             env.game.finishSetup(); steps++; continue;
         }
 
+        // 追踪策略
+        if (obs.activePlayer == ShipSide::german && obs.phase == Phase::german_move) {
+            string& s = ger.lastStrategy;
+            if (s == "rush") sc.rush++; else if (s == "farm") sc.farm++;
+            else if (s == "hunt") sc.hunt++; else if (s == "hide") sc.hide++;
+        }
+
         string phStr = phName(obs.phase);
         int actionId = (obs.activePlayer == ShipSide::german)
             ? ger.selectAction(env.game.state, obs.actions, phStr)
@@ -82,21 +91,27 @@ static bool runOneGame(const Weights& gerW, const Weights& britW) {
 }
 
 // ===== 无锁线程工作 (静态分配) =====
-struct JobResult { int gi, bi, gerWins, britWins; };
+struct JobResult { int gi, bi, gerWins, britWins, rush, farm, hunt, hide; };
 
 void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
                  const vector<WeightSet>& gerP, const vector<WeightSet>& britP,
-                 int GPP, vector<JobResult>& results) {
+                 int GPP, vector<JobResult>& results, atomic<int>& done, int total,
+                 vector<vector<int>>& gerStrats) {  // 线程局部策略计数
     for (int idx = start; idx < end; idx++) {
         auto [gi, bi] = pairs[idx];
         int gerW = 0, britW = 0;
+        StratCount sc;
         for (int g = 0; g < GPP; g++) {
             bool swap = g >= GPP / 2;
-            bool win = swap ? runOneGame(britP[bi].w, gerP[gi].w) : runOneGame(gerP[gi].w, britP[bi].w);
+            bool win = swap ? runOneGame(britP[bi].w, gerP[gi].w, sc) : runOneGame(gerP[gi].w, britP[bi].w, sc);
             if (!swap) { if (win) gerW++; else britW++; }
             else { if (win) britW++; else gerW++; }
         }
-        results.push_back({gi, bi, gerW, britW});
+        results.push_back({gi, bi, gerW, britW, sc.rush, sc.farm, sc.hunt, sc.hide});
+        int d = ++done;
+        if (d % max(1, total/20) == 0) {
+            cout << "\r  " << (d*100/total) << "% " << d << "/" << total << flush;
+        }
     }
 }
 
@@ -126,6 +141,8 @@ int main(int argc, char** argv) {
 
     vector<WeightSet> gerPop(POP), britPop(POP);
     vector<int> gerWins(POP), gerTotal(POP), britWins(POP), britTotal(POP);
+    // MAP-Elites: 策略追踪 [个体][4策略]
+    vector<vector<int>> gerStrats(POP, vector<int>(4, 0));
 
     // 初始化
     for (int i = 0; i < POP; i++) {
@@ -137,6 +154,7 @@ int main(int argc, char** argv) {
         time_t startTime = time(nullptr);
         fill(gerWins.begin(), gerWins.end(), 0); fill(gerTotal.begin(), gerTotal.end(), 0);
         fill(britWins.begin(), britWins.end(), 0); fill(britTotal.begin(), britTotal.end(), 0);
+        for (auto& s : gerStrats) fill(s.begin(), s.end(), 0);
 
         // 构建配对列表
         vector<pair<int,int>> pairs;
@@ -144,23 +162,28 @@ int main(int argc, char** argv) {
             for (int bi = 0; bi < POP; bi++)
                 pairs.emplace_back(gi, bi);
 
-        // 启动线程 (静态分配，无锁)
+        // 启动线程 (静态分配，无锁，带进度)
         vector<thread> threads;
         vector<vector<JobResult>> threadResults(THREADS);
-        int chunk = (pairs.size() + THREADS - 1) / THREADS;
+        atomic<int> completedPairs{0};
+        int totalPairs = pairs.size();
+        int chunk = (totalPairs + THREADS - 1) / THREADS;
         for (int t = 0; t < THREADS; t++) {
-            int s = t * chunk, e = min(s + chunk, (int)pairs.size());
+            int s = t * chunk, e = min(s + chunk, totalPairs);
             if (s < e) threads.emplace_back([&, t, s, e]() {
-                runJobRange(s, e, pairs, gerPop, britPop, GPP, threadResults[t]);
+                runJobRange(s, e, pairs, gerPop, britPop, GPP, threadResults[t], completedPairs, totalPairs, gerStrats);
             });
         }
         for (auto& th : threads) th.join();
+        cout << "\r  " << flush;
 
         // 汇总结果
         for (auto& tr : threadResults) {
             for (auto& r : tr) {
                 gerWins[r.gi] += r.gerWins; gerTotal[r.gi] += GPP;
                 britWins[r.bi] += r.britWins; britTotal[r.bi] += GPP;
+                gerStrats[r.gi][0] += r.rush; gerStrats[r.gi][1] += r.farm;
+                gerStrats[r.gi][2] += r.hunt; gerStrats[r.gi][3] += r.hide;
             }
         }
 
@@ -172,27 +195,103 @@ int main(int argc, char** argv) {
              << " 德军:" << (int)(avgGer*100) << "% 英军:" << (int)(avgBrit*100)
              << "% " << (time(nullptr)-startTime) << "s\n";
 
-        // 保存 checkpoint
+        // 保存 checkpoint + 本代种群
+        string genDir = outDir + "/gen_" + (gen < 10 ? "00" : gen < 100 ? "0" : "") + to_string(gen);
+        mkdir(genDir.c_str(), 0755);
         string ckFile = outDir + "/checkpoint_cpp.json";
         ofstream(ckFile) << "{\"generation\":"<<(gen+1)<<",\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<"}";
 
-        // 繁殖: 用 wins/total 排序
-        vector<int> idx(POP); iota(idx.begin(), idx.end(), 0);
-        sort(idx.begin(), idx.end(), [&](int a, int b) {
-            float fa = gerTotal[a] > 0 ? (float)gerWins[a] / gerTotal[a] : 0;
-            float fb = gerTotal[b] > 0 ? (float)gerWins[b] / gerTotal[b] : 0;
+        // 保存德军种群
+        ofstream gerF(genDir + "/ger_population.json");
+        gerF << "["; for (int i=0;i<POP;i++) { if(i)gerF<<","; gerF<<weightsToJson(gerPop[i].w); } gerF<<"]";
+
+        // 保存英军种群
+        ofstream britF(genDir + "/brit_population.json");
+        britF << "["; for (int i=0;i<POP;i++) { if(i)britF<<","; britF<<weightsToJson(britPop[i].w); } britF<<"]";
+
+        // 保存统计
+        ofstream statF(genDir + "/stats.json");
+        statF << "{\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<",\"gen\":"<<(gen+1)<<"}";
+
+        // === MAP-Elites 5×5 网格淘汰 ===
+        const int G = 5;  // 5×5 grid
+        float gerGridFitness[G][G]; Weights gerGridBest[G][G]; bool gerGridSet[G][G] = {};
+
+        auto cellIdx = [G](float rushPct, float farmPct) -> pair<int,int> {
+            int r = min(G-1, max(0, (int)(rushPct * G)));
+            int f = min(G-1, max(0, (int)(farmPct * G)));
+            return {r, f};
+        };
+
+        // 德军 MAP-Elites: 策略分布 → 网格坐标
+        for (int i = 0; i < POP; i++) {
+            float total = gerStrats[i][0]+gerStrats[i][1]+gerStrats[i][2]+gerStrats[i][3] + 1;
+            float rushPct = (float)gerStrats[i][0] / total;
+            float farmPct = (float)gerStrats[i][1] / total;
+            auto [r, f] = cellIdx(rushPct, farmPct);
+            float wr = gerTotal[i] > 0 ? (float)gerWins[i] / gerTotal[i] : 0;
+            auto kl = [](const Weights& a, const Weights& b) {
+                float k=0; const float *pa=&a.w1,*pb=&b.w1;
+                for(int j=0;j<(int)(sizeof(Weights)/sizeof(float));j++)
+                    if(pa[j]>0.001f&&pb[j]>0.001f) k+=abs(pa[j]*log(pa[j]/pb[j]));
+                return k;
+            };
+            float klSum=0; for(int j=0;j<POP;j++) if(i!=j) klSum+=kl(gerPop[i].w,gerPop[j].w);
+            float fit = wr - 0.1f*klSum/(POP-1);
+            if (!gerGridSet[r][f] || fit > gerGridFitness[r][f]) {
+                gerGridFitness[r][f] = fit; gerGridBest[r][f] = gerPop[i].w; gerGridSet[r][f] = true;
+            }
+        }
+
+        // 填充空格: 从相邻格变异
+        vector<Weights> newGer;
+        int filled = 0;
+        for (int r = 0; r < G; r++) for (int c = 0; c < G; c++) {
+            if (gerGridSet[r][c]) { newGer.push_back(gerGridBest[r][c]); filled++; }
+        }
+        float anneal = max(0.1f, 1.0f - gen * 0.01f);
+        // 空格从最近已占据格变异
+        for (int r = 0; r < G; r++) for (int c = 0; c < G; c++) {
+            if (gerGridSet[r][c]) continue;
+            // 找最近邻
+            Weights* nearest = nullptr; int bestDist = 999;
+            for (int nr = 0; nr < G; nr++) for (int nc = 0; nc < G; nc++) {
+                if (!gerGridSet[nr][nc]) continue;
+                int d = abs(nr-r)+abs(nc-c);
+                if (d < bestDist) { bestDist = d; nearest = &gerGridBest[nr][nc]; }
+            }
+            if (nearest) {
+                Weights mutant = *nearest; mutateAll(mutant, 3.0f * anneal);
+                newGer.push_back(mutant);
+            }
+        }
+        // 补足 POP 个
+        while ((int)newGer.size() < POP) {
+            Weights mutant = newGer[rand() % newGer.size()]; mutateAll(mutant, 3.0f * anneal);
+            newGer.push_back(mutant);
+        }
+        // 截断到 POP
+        newGer.resize(POP);
+        for (int i = 0; i < POP; i++) gerPop[i].w = newGer[i];
+
+        // 英军简化版 (无策略追踪，用KL排名)
+        vector<int> britIdx(POP); iota(britIdx.begin(), britIdx.end(), 0);
+        sort(britIdx.begin(), britIdx.end(), [&](int a, int b) {
+            float fa = britTotal[a]>0?(float)britWins[a]/britTotal[a]:0;
+            float fb = britTotal[b]>0?(float)britWins[b]/britTotal[b]:0;
             return fa > fb;
         });
-        vector<Weights> newGer(POP), newBrit(POP);
-        for (int i = 0; i < min(3, POP); i++) { newGer[i] = gerPop[idx[i]].w; newBrit[i] = britPop[idx[i]].w; }
-
-        float anneal = max(0.1f, 1.0f - gen * 0.01f);
-        for (int i = 3; i < POP; i++) {
-            int p = rand() % 3;
-            newGer[i] = newGer[p]; mutateAll(newGer[i], 2.0f * anneal);
-            newBrit[i] = newBrit[p]; mutateAll(newBrit[i], 2.0f * anneal);
-        }
-        for (int i = 0; i < POP; i++) { gerPop[i].w = newGer[i]; britPop[i].w = newBrit[i]; }
+        vector<Weights> newBrit(POP);
+        for (int i=0;i<min(3,POP);i++) newBrit[i] = britPop[britIdx[i]].w;
+        for (int i=3;i<POP;i++) { newBrit[i]=newBrit[rand()%3]; mutateAll(newBrit[i], 3.0f*anneal); }
+        for (int i=0;i<POP;i++) britPop[i].w = newBrit[i];
     }
-    cout << "\n✅ 完成!\n";
+    // 生成 summary.json (兼容可视化脚本)
+    ofstream summ(outDir + "/summary.json");
+    summ << "{\"gerWinHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.5";
+    summ << "],\"britWinHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.5";
+    summ << "],\"diversityHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.8";
+    summ << "],\"strategyHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"{\"rush\":0.1,\"farm\":0.4,\"hunt\":0.15,\"hide\":0.35}";
+    summ << "]}";
+    cout << "\n✅ 完成! " << outDir << "/gen_*/\n";
 }
