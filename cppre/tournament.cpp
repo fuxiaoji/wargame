@@ -65,7 +65,7 @@ bool runOneGame(const Weights& gerW, const Weights& britW) {
     int steps = 0, stuck = 0; Phase lastPhase = Phase::game_over;
 
     while (!env.game.state.gameOver && steps < 500) {
-        auto obs = env.getObservation();
+        auto obs = env.getFastObservation();  // 跳过文本生成，加速
         if (obs.phase != Phase::setup_british && obs.actions.empty()) break;
 
         if (obs.phase == lastPhase) stuck++;
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
     int GEN = argc > 1 ? std::stoi(argv[1]) : 20;
     int POP = argc > 2 ? std::stoi(argv[2]) : 5;
     int GPP = argc > 3 ? std::stoi(argv[3]) : 50; // games per pair
-    std::string outDir = argc > 4 ? argv[4] : "../tournament";
+    std::string outDir = argc > 4 ? argv[4] : "/Users/Zhuanz1/Desktop/code/wargame/tournament";
 
     mkdir(outDir.c_str(), 0755);
 
@@ -126,15 +126,22 @@ int main(int argc, char** argv) {
         // 简化: 重新随机初始化
     }
 
-    // 初始化种群
+    // 初始化种群 (全部权重 30% 概率变异, 与 TS 版一致)
+    auto mutateAll = [](Weights& w, float scale) {
+        float* ptr = &w.w1; int count = sizeof(Weights) / sizeof(float);
+        for (int i = 0; i < count; i++) {
+            if ((float)std::rand()/RAND_MAX < 0.3f) {
+                float& val = *(ptr + i);
+                val = std::max(0.1f, val + ((float)std::rand()/RAND_MAX - 0.5f) * scale);
+            }
+        }
+    };
     for (int i = 0; i < POP; i++) {
         gerPop[i].w = Weights{};
         britPop[i].w = Weights{};
         if (i > 0) {
-            // 变异
-            gerPop[i].w.w1 += ((float)std::rand()/RAND_MAX - 0.5f) * 4;
-            gerPop[i].w.w5 += ((float)std::rand()/RAND_MAX - 0.5f) * 4;
-            britPop[i].w.s1 += ((float)std::rand()/RAND_MAX - 0.5f) * 4;
+            mutateAll(gerPop[i].w, 4.0f);
+            mutateAll(britPop[i].w, 4.0f);
         }
     }
 
@@ -156,12 +163,14 @@ int main(int argc, char** argv) {
                     const Weights& britW = swap ? gerPop[gi].w : britPop[bi].w;
                     bool gerWin = runOneGame(gerW, britW);
 
+                    // 胜场记在"谁在玩德军谁就是德军权重"
                     if (!swap) {
                         gerPop[gi].total++; if (gerWin) gerPop[gi].wins++;
                         britPop[bi].total++; if (!gerWin) britPop[bi].wins++;
                     } else {
-                        gerPop[gi].total++; if (gerWin) gerPop[gi].wins++;
-                        britPop[bi].total++; if (!gerWin) britPop[bi].wins++;
+                        // swap=true: britPop[bi].w 玩德军, gerPop[gi].w 玩英军
+                        britPop[bi].total++; if (gerWin) britPop[bi].wins++;
+                        gerPop[gi].total++; if (!gerWin) gerPop[gi].wins++;
                     }
                     completed++;
                     if (completed % (total / 20 + 1) == 0) {
@@ -193,18 +202,23 @@ int main(int argc, char** argv) {
         ck << "],\"avgGer\":" << avgGer << ",\"avgBrit\":" << avgBrit << "}";
         std::ofstream(ckFile) << ck.str();
 
-        // 简单排序+变异（保留 Top3）
+        // 排名: 综合德军胜率+英军胜率
         std::sort(gerPop.begin(), gerPop.end(), [](auto& a, auto& b) {
-            return (a.total>0?(float)a.wins/a.total:0) > (b.total>0?(float)b.wins/b.total:0); });
+            float fa = (a.total>0?(float)a.wins/a.total:0);
+            float fb = (b.total>0?(float)b.wins/b.total:0);
+            return fa > fb;
+        });
         std::sort(britPop.begin(), britPop.end(), [](auto& a, auto& b) {
-            return (a.total>0?(float)a.wins/a.total:0) > (b.total>0?(float)b.wins/b.total:0); });
+            float fa = (a.total>0?(float)a.wins/a.total:0);
+            float fb = (b.total>0?(float)b.wins/b.total:0);
+            return fa > fb;
+        });
 
+        float anneal = std::max(0.1f, 1.0f - gen * 0.01f);  // 退火
         for (int i = 3; i < POP; i++) {
             int parent = std::rand() % 3;
-            gerPop[i].w = gerPop[parent].w;
-            gerPop[i].w.w1 += ((float)std::rand()/RAND_MAX - 0.5f) * 2;
-            britPop[i].w = britPop[parent].w;
-            britPop[i].w.s1 += ((float)std::rand()/RAND_MAX - 0.5f) * 2;
+            gerPop[i].w = gerPop[parent].w; mutateAll(gerPop[i].w, 2.0f * anneal);
+            britPop[i].w = britPop[parent].w; mutateAll(britPop[i].w, 2.0f * anneal);
         }
     }
 

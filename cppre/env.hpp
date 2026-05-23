@@ -56,8 +56,7 @@ public:
 
         oss << "=== 第" << s.turn << "/18回合 | " << phaseName(s.phase) << " ===\n";
         oss << "德军VP:" << s.vp.german << "(需6) 英军VP:" << s.vp.british << "\n";
-        if (s.bismarckFound) oss << "⚠ 俾斯麦位置已暴露!\n";
-        if (s.germanPositionPublic) oss << "⚠ 德军位置本回合公开!\n";
+        if (s.germanPositionPublic) oss << "⚠ 德军位置本回合公开!（伪装鉴定失败）\n";
         if (s.transportRevealedHex) oss << "📡 信号泄露: 上回合德军曾在 " << *s.transportRevealedHex << "\n";
         oss << "\n";
 
@@ -73,7 +72,7 @@ public:
             if (it != s.britishPositions.end())
                 occupied[hexToLabel(it->second).value_or("?")].push_back(ship.def.name);
         }
-        if (player == ShipSide::german || s.bismarckFound || s.germanPositionPublic) {
+        if (player == ShipSide::german || s.germanPositionPublic) {
             for (const auto& ship : s.germanShips) {
                 if (ship.steps <= 0) continue;
                 auto it = s.germanPositions.find(ship.def.id);
@@ -108,8 +107,7 @@ public:
                 auto it = s.britishPositions.find(ship.def.id);
                 std::string label = it != s.britishPositions.end() ? hexToLabel(it->second).value_or("?") : "?";
                 if (ship.revealed) oss << shipLine(ship, label) << "\n";
-                else if (ship.def.isDummy) oss << "  伪装算子 [" << label << "]\n";
-                else oss << "  ? [背面] " << label << "\n";
+                else oss << "  背面算子 [" << label << "]\n";  // 德军看不到身份
             }
         } else {
             oss << "== 英军舰队 (你) ==\n";
@@ -119,8 +117,9 @@ public:
                 oss << shipLine(ship, it != s.britishPositions.end() ? hexToLabel(it->second).value_or("?") : "?") << "\n";
             }
             oss << "\n";
-            if (s.bismarckFound || s.germanPositionPublic) {
-                oss << "== 德军舰队 (已知) ==\n";
+            // bismarckFound 只解锁英军移动，不暴露当前位置
+            if (s.germanPositionPublic) {
+                oss << "== 德军舰队 (公开) ==\n";
                 for (const auto& ship : s.germanShips) {
                     if (ship.steps <= 0) continue;
                     auto it = s.germanPositions.find(ship.def.id);
@@ -129,10 +128,25 @@ public:
             } else {
                 oss << "== 德军舰队 ==\n";
                 oss << "  位置未知。需通过索敌发现。\n";
+                if (s.bismarckFound) oss << "  注意: 英军已发现过俾斯麦，所有战舰解锁可移动。\n";
                 oss << "  德军起始格: A5/A6/B7 之一\n";
             }
         }
         oss << "\n";
+
+        // setup-british: 显坐标格式，不显示编号列表
+        if (s.phase == Phase::setup_british) {
+            bool any = false;
+            for (const auto& sh : s.britishShips)
+                if (!s.britishPositions.count(sh.def.id)) { any = true; break; }
+            if (any) {
+                oss << "📝 需放置算子。请直接回复坐标格式 (不要编号):\n";
+                oss << "   格式: (舰名,格号)(舰名,格号)...\n";
+                oss << "   例如: (胡德号,E7)(诺福克号,D1)\n";
+                auto acts = getActions(); // 只用于返回结构，LLM不依赖编号
+                return { oss.str(), player, s.phase, acts, s.gameOver, s.winner, &s };
+            }
+        }
 
         auto actions = getActions();
         oss << "--- 请选择操作 (回复数字编号) ---\n";
@@ -140,6 +154,14 @@ public:
             oss << "[" << a.id << "] " << a.label << "\n";
 
         return { oss.str(), player, s.phase, actions, s.gameOver, s.winner, &s };
+    }
+
+    // ---- 快速观察 (跳过文本生成，仅动作列表) ----
+    GameObservation getFastObservation() {
+        const auto& s = game.state;
+        ShipSide player = game.getActivePlayer();
+        auto actions = getActions();
+        return { "", player, s.phase, actions, s.gameOver, s.winner, &s };
     }
 
     // ---- 动作列表 ----
