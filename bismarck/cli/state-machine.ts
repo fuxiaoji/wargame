@@ -28,7 +28,7 @@ export interface Weights {
 
 export const DEFAULT_WEIGHTS: Weights = {
   w1:3, w2:2, w3:1, w4:4, w5:2, w6:3, w7:2, w8:1,
-  w9:3, w10:2, w11:2, w12:5, w13:4, w14:1, w15:2,
+  w9:4, w10:2, w11:1, w12:2, w13:3, w14:1, w15:2,  // w9↑鼓励狩猎, w12↓别太怂
   s1:10, s2:0.5, s3:1, h1:10, h2:5, h3:3,
   d1:5, d2:3, d3:4, temperature: 1.0
 }
@@ -214,7 +214,11 @@ class GermanBrain {
 
     const strategies = ['rush', 'farm', 'hunt', 'hide']
     const finalScores = [rush + shipBonus[0], farm + shipBonus[1], hunt + shipBonus[2], hide + shipBonus[3]]
-    const picked = weightedPick(strategies, finalScores, this.w.temperature)
+    // 混合 5% 均匀分布, 确保每种策略至少有探索机会
+    const probs = softmax(finalScores, this.w.temperature)
+    const uniform = 0.25  // 均匀分布每个 25%
+    const blend = probs.map(p => p * 0.95 + uniform * 0.05)  // 95%策略+5%均匀
+    const picked = strategies[weightedPick(strategies.map((_, i) => i), blend, 0.5)]
 
     // 策略修正热力图
     if (picked === 'rush') {

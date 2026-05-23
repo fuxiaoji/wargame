@@ -12,7 +12,7 @@
 #include <string>
 
 struct Weights {
-    float w1=3,w2=2,w3=1,w4=4, w5=2,w6=3,w7=2,w8=1, w9=3,w10=2,w11=2, w12=5,w13=4,w14=1,w15=2;
+    float w1=3,w2=2,w3=1,w4=4, w5=2,w6=3,w7=2,w8=1, w9=4,w10=2,w11=1, w12=2,w13=3,w14=1,w15=2;
     float s1=10,s2=0.5f,s3=1, h1=10,h2=5,h3=3, d1=5,d2=3,d3=4;
     float temperature = 1.0f;
 };

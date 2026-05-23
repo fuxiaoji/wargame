@@ -5,6 +5,16 @@ import json, sys, os, struct, numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+# 中文字体配置 (macOS)
+for f in ['PingFang SC', 'Heiti SC', 'STHeiti', 'Arial Unicode MS', 'sans-serif']:
+    try:
+        fm.findfont(f, fallback_to_default=False)
+        plt.rcParams['font.sans-serif'] = [f]
+        break
+    except: pass
+plt.rcParams['axes.unicode_minus'] = False
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 from collections import defaultdict
 
