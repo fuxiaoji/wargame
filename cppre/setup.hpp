@@ -54,6 +54,7 @@ inline GameState createGameState() {
     s.transportPending = false;
     s.germanPositionPublic = false;
     s.transportRevealedHex = std::nullopt;
+    s.airSearchDone = false;
     s.gameOver = false;
     s.winner = std::nullopt;
     return s;

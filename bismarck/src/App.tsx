@@ -15,8 +15,14 @@ import { Dashboard } from '../ui/components/Dashboard'
 import { GameLog } from '../engine/log'
 import { BismarckEnv, GameAction } from '../engine/env'
 import type { CombatResult } from '../engine/combat'
-import { GERMAN_START_HEXES } from '../engine/map'
+import { GERMAN_START_HEXES, hexNeighbors } from '../engine/map'
+import { BRITISH_FIXED_POSITIONS } from '../engine/setup'
+import { getGermanReachableLabels } from '../engine/movement'
 import { useTensorLogger } from '../ui/hooks/useTensorLogger'
+import { GERMAN_PRESETS, BRITISH_PRESETS, findPresetWeights } from '../cli/presets'
+import { createStateMachineAI, DEFAULT_WEIGHTS } from '../cli/state-machine'
+import type { AIDebugInfo } from '../cli/state-machine'
+import { AIInternalsPanel } from '../ui/components/AIInternalsPanel'
 
 function loadCalibration() {
   const s = localStorage.getItem('bismarck_map_scale')
@@ -134,10 +140,70 @@ export default function App() {
   const [smGen, setSmGen] = useState(() => parseInt(localStorage.getItem('bismarck_sm_gen') || '19'))
   const [smGerIdx, setSmGerIdx] = useState(() => parseInt(localStorage.getItem('bismarck_sm_ger') || '0'))
   const [smBritIdx, setSmBritIdx] = useState(() => parseInt(localStorage.getItem('bismarck_sm_brit') || '0'))
+  const gerPreset = useMemo(() => GERMAN_PRESETS.find(p => p.version === smVersion && p.index === smGerIdx), [smVersion, smGerIdx])
+  const britPreset = useMemo(() => BRITISH_PRESETS.find(p => p.version === smVersion && p.index === smBritIdx), [smVersion, smBritIdx])
   const [showAIThinking, setShowAIThinking] = useState(true)
   const [aiThinking, setAIThinking] = useState('')
   const [showAIConfig, setShowAIConfig] = useState(false)
+  const [showBaseHeatmap, setShowBaseHeatmap] = useState(false)
+  const [showPrediction, setShowPrediction] = useState(false)
   const [showDebug, setShowDebug] = useState(false)
+  const showDebugRef = useRef(false)
+  const [smDebugData, setSmDebugData] = useState<AIDebugInfo[]>([])
+  const smDebugResumeRef = useRef<(() => void) | null>(null)
+  const [smDebugPaused, setSmDebugPaused] = useState(false)
+  const [smDebugBuffer, setSmDebugBuffer] = useState<AIDebugInfo[]>([])
+  const [smDebugActiveIndex, setSmDebugActiveIndex] = useState(0)
+  // 热力图：英军算子 (人玩德军可选)
+  const baseHeatmap = useMemo(() => {
+    if (!gameState || !showBaseHeatmap) return null
+    const hm = new Float32Array(48)
+    const W = 6
+    for (const sh of gameState.britishShips) {
+      const pos = gameState.britishPositions.get(sh.def.id); if (!pos) continue
+      // 本格 +2
+      const idx = pos.r * W + pos.q; if (idx >= 0 && idx < 48) hm[idx] += 2
+      // 邻格 +1
+      for (const nb of hexNeighbors(pos)) {
+        const nidx = nb.r * W + nb.q; if (nidx >= 0 && nidx < 48) hm[nidx] += 1
+      }
+      // 威胁范围 3 格 BFS +0.5
+      const visited2 = new Set<string>()
+      const queue2: {q:number;r:number;d:number}[] = [{q:pos.q,r:pos.r,d:0}]
+      visited2.add(`${pos.q},${pos.r}`)
+      while (queue2.length > 0) {
+        const cur = queue2.shift()!
+        if (cur.d > 0 && cur.d <= 3) { const i2 = cur.r * W + cur.q; if (i2 >= 0 && i2 < 48) hm[i2] += 0.5 }
+        if (cur.d >= 3) continue
+        for (const nb2 of hexNeighbors({q:cur.q,r:cur.r})) {
+          const k = `${nb2.q},${nb2.r}`; if (!visited2.has(k)) { visited2.add(k); queue2.push({q:nb2.q,r:nb2.r,d:cur.d+1}) }
+        }
+      }
+    }
+    return hm
+  }, [gameState?.turn, gameState?.phase, showBaseHeatmap])
+  // 德军可能位置推演 (人玩英军可选)
+  const predictionHeatmap = useMemo(() => {
+    if (!gameState || !showPrediction) return null
+    const hm = new Float32Array(48)
+    if (gameState.germanPositionPublic) {
+      for (const [id, pos] of gameState.germanPositions) {
+        const idx = pos.r * 6 + pos.q; if (idx >= 0 && idx < 48) hm[idx] += 5
+      }
+    } else {
+      // 从未发现: 从出生点速2扩散
+      for (const label of GERMAN_START_HEXES) {
+        const h = { q: label.charCodeAt(0)-65, r: parseInt(label.slice(1)) }
+        if (h.q < 0 || h.q >= 6 || h.r < 1 || h.r > 8) continue
+        const dummyShip = { def: { speed: 2 }, steps: 2 } as any
+        for (const l of getGermanReachableLabels(dummyShip, h)) {
+          const c = l.charCodeAt(0) - 65; const rr = parseInt(l.slice(1))
+          const idx = rr * 6 + c; if (idx >= 0 && idx < 48) hm[idx] += 3
+        }
+      }
+    }
+    return hm
+  }, [gameState?.turn, gameState?.phase, gameState?.germanPositionPublic, showPrediction])
   const [debugLines, setDebugLines] = useState<{ time: string; text: string; color: string }[]>([])
   const [aiReasoning, setAIReasoning] = useState('')  // AI思考过程展示
   const [aiLevel, setAiLevel] = useState<'low'|'high'>(() => (localStorage.getItem('bismarck_ai_level') as 'low'|'high') || 'low')
@@ -214,16 +280,29 @@ export default function App() {
       const isSM = aiSide === 'sm-german' || aiSide === 'sm-british'
       if (isSM) {
         const smEnv = new BismarckEnv(); (smEnv as any).game = game
-        // 动态加载个体
-        const { listIndividuals, createStateMachineAI } = await import('../cli/ai-loader')
-        const info = listIndividuals(smVersion, smGen)
-        const gerW = info.german[smGerIdx]?.weights
+        const gerW = gerPreset?.weights || findPresetWeights(smVersion, smGerIdx) || DEFAULT_WEIGHTS
         const ai = createStateMachineAI(gerW)
-        addDebug(`状态机: ${smVersion} Gen${smGen} 德#${smGerIdx}(${info.german[smGerIdx]?.style||'?'}) 英#${smBritIdx}(${info.british[smBritIdx]?.style||'?'})`, '#a78bfa')
+        const isSMGerman = aiSide === 'sm-german'
+        addDebug(`状态机: ${smVersion} Gen${smGen} 德#${smGerIdx}(${gerPreset?.style||'?'}) 英#${smBritIdx}(${britPreset?.style||'?'})`, '#a78bfa')
 
         let smSteps = 0, smStuck = 0, smLast = ''
+        let phaseDebugBuffer: AIDebugInfo[] = []
+        // 阶段前快照 (保存 Map 引用)
+        let snapGerPos: Map<string, any> | null = null
+        let snapBritPos: Map<string, any> | null = null
         while (!gameState.gameOver && smSteps < 300) {
           const obs = smEnv.getObservation(); (obs as any).raw = game.state
+          // 进入新AI阶段 → 拍照 Map
+          if (obs.phase !== smLast && showDebugRef.current) {
+            snapGerPos = new Map(game.state.germanPositions)
+            snapBritPos = new Map(game.state.britishPositions)
+          }
+
+          // 人类回合 → 退出AI循环
+          const isGermanP = obs.phase === 'setup-german' || obs.phase === 'german-move' || obs.phase === 'transport-attack'
+          if (isSMGerman && !isGermanP) break
+          if (!isSMGerman && isGermanP) break
+
           if (obs.phase !== 'setup-british' && obs.actions.length === 0) break
 
           if (obs.phase === smLast) smStuck++; else { smStuck = 0; smLast = obs.phase }
@@ -232,36 +311,86 @@ export default function App() {
             if (f) { smEnv.step(f); smStuck = 0; continue }
           }
 
+          // 英军初设 (仅 sm-british 进入)
           if (obs.phase === 'setup-british') {
-            // 调用状态机BritishBrain决定真船位置 → 靠近德军出生点
-            const setupRes = ai.selectBritish(obs)
-            const raw = setupRes.rawResponse
-            // 解析坐标格式: (胡德号,B6)(威尔士亲王号,C5)
-            const re = /\(([^,)]+),\s*([A-F]\d)\)/g; let m
             const s = game.state
-            while ((m = re.exec(raw)) !== null) {
-              const sh = s.britishShips.find(x => !x.def.isDummy && !s.britishPositions.has(x.def.id) &&
-                (x.def.name === m![1].trim() || x.def.name.includes(m![1].trim()) || m![1].trim().includes(x.def.name.slice(0,2))))
-              if (sh) game.placeBritishToken(sh.def.id, m[2])
+            // 1. 固定舰船归位 + 德军初始格不可用
+            const used = new Set<string>(GERMAN_START_HEXES)
+            for (const [hex, shipIds] of Object.entries(BRITISH_FIXED_POSITIONS)) {
+              used.add(hex)
+              for (const id of shipIds) game.placeBritishToken(id, hex)
             }
-            // 伪装随机放
-            const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
+            // 2. 德军速2可达格 (使用游戏引擎自带函数, 自动排除不可达格)
+            const dummyShip = { def: { speed: 2 }, steps: 2 } as any
+            const reachable = new Set<string>()
+            for (const label of GERMAN_START_HEXES) {
+              const h = { q: label.charCodeAt(0) - 65, r: parseInt(label.slice(1)) }
+              if (h.q < 0 || h.q >= 6 || h.r < 1 || h.r > 8) continue
+              for (const l of getGermanReachableLabels(dummyShip, h)) {
+                if (!used.has(l)) reachable.add(l)
+              }
+            }
+            // 3. 自由舰船随机放, 真船先、伪装后, 每格一艘
+            const placeFree = (isDummy: boolean) => {
+              for (const sh of s.britishShips) {
+                if (sh.def.isDummy !== isDummy || s.britishPositions.has(sh.def.id)) continue
+                const avail = [...reachable].filter(h => !used.has(h))
+                if (avail.length > 0) {
+                  const picked = avail[Math.floor(Math.random() * avail.length)]
+                  game.placeBritishToken(sh.def.id, picked); used.add(picked)
+                }
+              }
+            }
+            placeFree(false); placeFree(true)
+            // 4. 放不完的fallback
+            const fallback = ['E7','E5','E3','E2','E1','D8','D5','D4','D3','D2','D1','C7','C1','B6','F6','F5','F3','F2','A3','A4','B4']
             for (const sh of s.britishShips)
-              if (!s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
+              if (!s.britishPositions.has(sh.def.id))
+                game.placeBritishToken(sh.def.id, fallback[Math.floor(Math.random()*fallback.length)])
             const r = game.finishSetup()
-            addDebug(`SM初设: ${r.ok ? '✅完成' : '❌'+r.error} | ${raw.slice(0,60)}`, r.ok ? '#4ade80' : '#ef4444')
-            refresh(); smSteps++; continue
+            addDebug(`SM初设: ${r.ok ? '✅完成' : '❌'+r.error} | 可达${reachable.size}格`, r.ok ? '#4ade80' : '#ef4444')
+            refresh(); smSteps++; await new Promise(r => setTimeout(r, 300)); continue
           }
 
-          const result = obs.activePlayer === 'german' ? ai.selectGerman(obs) : ai.selectBritish(obs)
+          // 新阶段 → 清空buffer
+          if (obs.phase !== smLast) { phaseDebugBuffer = []; setSmDebugActiveIndex(0) }
+          const dbg = showDebugRef.current
+          const result = obs.activePlayer === 'german' ? ai.selectGerman(obs, dbg) : ai.selectBritish(obs, dbg)
+          if (dbg && 'debug' in result && (result as any).debug) {
+            phaseDebugBuffer.push((result as any).debug)
+          }
+          // 执行动作 (调试模式下不立即刷新)
           if (result.actionId != null) {
             const a = obs.actions.find(x => x.id === result.actionId)
             if (a) smEnv.step(a); else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
           } else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
-          smSteps++; refresh()
+          smSteps++
+          if (!dbg) refresh()
+
+          // 阶段结束检查
+          const nextObs = smEnv.getObservation()
+          const nextGermanP = nextObs.phase === 'setup-german' || nextObs.phase === 'german-move' || nextObs.phase === 'transport-attack'
+          const phaseEnd = nextObs.phase !== obs.phase || (isSMGerman ? !nextGermanP : nextGermanP)
+          if (phaseEnd) {
+            if (dbg && phaseDebugBuffer.length > 0) {
+              // 暂停时替换Map为阶段前快照，地图显示AI移动前
+              const realGer = game.state.germanPositions
+              const realBrit = game.state.britishPositions
+              if (snapGerPos) game.state.germanPositions = snapGerPos
+              if (snapBritPos) game.state.britishPositions = snapBritPos
+              setSmDebugData([...phaseDebugBuffer])
+              setSmDebugPaused(true)
+              try { await new Promise<void>(resolve => { smDebugResumeRef.current = resolve }) } catch {}
+              setSmDebugPaused(false)
+              game.state.germanPositions = realGer
+              game.state.britishPositions = realBrit
+            }
+            refresh()
+          }
+          if (!dbg) await new Promise(r => setTimeout(r, 300))
         }
         aiRunningRef.current = false
-        addDebug('状态机回合结束', '#a78bfa')
+        addDebug(isSMGerman ? '德军回合结束' : '英军回合结束', '#a78bfa')
         return
       }
 
@@ -708,15 +837,32 @@ export default function App() {
                 <option value="training_v1">V1(KL)</option>
                 <option value="training_v2">V2(MAP)</option>
               </select>
-              <span className="text-xs text-slate-500">Gen</span>
-              <input value={smGen} onChange={e => { setSmGen(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_gen', e.target.value) }}
-                className="w-10 bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs text-center" />
               <span className="text-xs text-slate-500">德#</span>
               <input value={smGerIdx} onChange={e => { setSmGerIdx(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_ger', e.target.value) }}
                 className="w-8 bg-slate-800 border border-red-600 rounded px-1 py-0.5 text-xs text-center" />
+              {gerPreset && <span className="text-xs text-red-400 font-mono">{gerPreset.winRate*100|0}% {gerPreset.style}</span>}
               <span className="text-xs text-slate-500">英#</span>
               <input value={smBritIdx} onChange={e => { setSmBritIdx(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_brit', e.target.value) }}
                 className="w-8 bg-slate-800 border border-blue-600 rounded px-1 py-0.5 text-xs text-center" />
+              {britPreset && <span className="text-xs text-blue-400 font-mono">{britPreset.winRate*100|0}% {britPreset.style}</span>}
+              <span className="text-slate-600">|</span>
+              <span className="text-xs text-slate-500">预设:</span>
+              {GERMAN_PRESETS.map(p => (
+                <button key={p.label} onClick={() => { setSmVersion(p.version); setSmGen(p.generation); setSmGerIdx(p.index); localStorage.setItem('bismarck_sm_ver', p.version); localStorage.setItem('bismarck_sm_gen', String(p.generation)); localStorage.setItem('bismarck_sm_ger', String(p.index)) }}
+                  className={`px-1.5 py-0.5 text-xs rounded border ${smVersion===p.version && smGerIdx===p.index ? 'bg-red-800 border-red-500 text-red-200' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-red-500'}`}
+                  title={`${p.label}: 对英胜率${(p.winRate*100)|0}% - ${p.style}`}>德{(p.winRate*100)|0}%</button>
+              ))}
+              <span className="text-slate-600">|</span>
+              {BRITISH_PRESETS.map(p => (
+                <button key={p.label} onClick={() => { setSmVersion(p.version); setSmGen(p.generation); setSmBritIdx(p.index); localStorage.setItem('bismarck_sm_ver', p.version); localStorage.setItem('bismarck_sm_gen', String(p.generation)); localStorage.setItem('bismarck_sm_brit', String(p.index)) }}
+                  className={`px-1.5 py-0.5 text-xs rounded border ${smVersion===p.version && smBritIdx===p.index ? 'bg-blue-800 border-blue-500 text-blue-200' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-blue-500'}`}
+                  title={`${p.label}: 对德胜率${(p.winRate*100)|0}% - ${p.style}`}>英{(p.winRate*100)|0}%</button>
+              ))}
+              <span className="text-slate-600">|</span>
+              <button onClick={() => { const v = !showDebug; setShowDebug(v); showDebugRef.current = v; if (!v) { setSmDebugData([]); smDebugResumeRef.current?.() } }}
+                className={`px-2 py-1 text-xs rounded ${showDebug ? 'bg-green-700 text-green-200' : 'bg-slate-700 text-slate-300'}`}>
+                🖥 调试
+              </button>
             </>
           )}
           {aiSide && aiSide !== 'sm-german' && aiSide !== 'sm-british' && (
@@ -747,6 +893,16 @@ export default function App() {
                 🖥 调试
               </button>
             </>
+          )}
+          {(aiSide === 'sm-british' || aiSide === 'british' || aiSide === null) && (
+            <button onClick={() => setShowBaseHeatmap(!showBaseHeatmap)}
+              className={`px-2 py-1 text-xs rounded border ${showBaseHeatmap ? 'bg-amber-700 border-amber-500 text-amber-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
+              title="显示英军算子热力图(德军视角)">🔥 热力</button>
+          )}
+          {(aiSide === 'sm-german' || aiSide === 'german') && (
+            <button onClick={() => setShowPrediction(!showPrediction)}
+              className={`px-2 py-1 text-xs rounded border ${showPrediction ? 'bg-purple-700 border-purple-500 text-purple-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
+              title="显示英军AI推演的德军可能位置">🎯 推演</button>
           )}
           <button onClick={() => setShowCalibration(true)}
             className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs rounded border border-slate-500">校准地图</button>
@@ -794,9 +950,9 @@ export default function App() {
             highlightedHexes={highlightedHexes}
             selectedHex={selectedHex}
             showGermanPositions={
-              aiSide === 'british' ||  // 人玩德军 → 始终看己方
+              (aiSide === 'british' || aiSide === 'sm-british') ||  // 人玩德军 → 始终看己方
               (aiSide === null && isGermanPhase) ||  // 双人按阶段切换
-              (aiSide === 'german' && gameState.germanPositionPublic)  // 人玩英军 → 仅伪装鉴定失败时
+              ((aiSide === 'german' || aiSide === 'sm-german') && gameState.germanPositionPublic)  // 人玩英军 → 仅伪装鉴定失败时
             }
             transportRevealedHex={gameState.transportRevealedHex}
             onHexClick={handleHexClick}
@@ -807,6 +963,7 @@ export default function App() {
             zoom={mapZoom}
             selectedShip={selectedShip}
             displayMode={displayMode}
+            heatmapData={showDebug && smDebugData.length > 0 ? (smDebugActiveIndex >= 0 ? smDebugData[smDebugActiveIndex]?.heatmap ?? null : showPrediction ? predictionHeatmap : null) : showBaseHeatmap ? baseHeatmap : showPrediction ? predictionHeatmap : null}
           />
         </div>
 
@@ -892,7 +1049,59 @@ export default function App() {
             )}
           </div>
         )}
-        {isAITurn && (
+        {isAITurn && (aiSide === 'sm-german' || aiSide === 'sm-british') && (
+          <div className="w-full lg:w-80 space-y-2">
+            <div className="bg-slate-800 border border-emerald-700 rounded-lg p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🧠</span>
+                <span className="text-emerald-300 font-bold text-sm">
+                  状态机{aiSide === 'sm-german' ? '德军' : '英军'}行动中
+                </span>
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                {smVersion} Gen{smGen} | {aiSide === 'sm-german' ? `德#${smGerIdx}` : `英#${smBritIdx}`}{aiSide === 'sm-german' ? (gerPreset ? ` (${gerPreset.winRate*100|0}% ${gerPreset.style})` : '') : (britPreset ? ` (${britPreset.winRate*100|0}% ${britPreset.style})` : '')}
+              </div>
+            </div>
+            {showDebug && smDebugData.length > 0 && (
+              <div className="bg-slate-800 border border-green-700 rounded-lg p-2 space-y-2">
+                {smDebugPaused && (
+                  <button onClick={() => smDebugResumeRef.current?.()}
+                    className="w-full py-2 bg-green-600 hover:bg-green-500 text-white rounded font-bold text-sm">
+                    ▶ 执行全部 & 继续
+                  </button>
+                )}
+                <div className="text-xs text-slate-400">舰船列表 (点击切换):</div>
+                {smDebugData.map((d, i) => (
+                  <button key={i} onClick={() => setSmDebugActiveIndex(i)}
+                    className={`w-full text-left px-2 py-1 rounded text-xs flex justify-between items-center ${i === smDebugActiveIndex ? 'bg-green-900 border border-green-600' : 'bg-slate-700 hover:bg-slate-600'}`}>
+                    <span className="text-slate-200">{d.curShip}</span>
+                    <span className="text-slate-400">{d.pickedStrategy} → {d.moveScores.length > 0 ? d.moveScores.reduce((a,b) => a.score > b.score ? a : b).label : '?'}</span>
+                  </button>
+                ))}
+                {/* 德军推演热力图选项 */}
+                {aiSide === 'sm-german' && (
+                  <button onClick={() => { setShowPrediction(!showPrediction); setSmDebugActiveIndex(-1) }}
+                    className={`w-full text-left px-2 py-1 rounded text-xs ${showPrediction ? 'bg-purple-900 border border-purple-600 text-purple-200' : 'bg-slate-700 hover:bg-slate-600 text-slate-400'}`}>
+                    🎯 德军可能位置推演 {showPrediction ? '✓' : ''}
+                  </button>
+                )}
+                {smDebugActiveIndex < smDebugData.length && (
+                  <div className="border-t border-slate-700 pt-2">
+                    <AIInternalsPanel data={smDebugData[smDebugActiveIndex]} />
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs font-mono max-h-32 overflow-y-auto">
+              {log.entries.slice(-8).map((e, i) => {
+                const colors: Record<string, string> = { setup: 'text-slate-400', move: 'text-cyan-400', search: 'text-yellow-400', combat: 'text-red-400', transport: 'text-green-400', turn: 'text-slate-500', victory: 'text-amber-400' }
+                return <div key={i} className={colors[e.type] || 'text-slate-500'}>T{e.turn} {e.message}</div>
+              })}
+              {log.entries.length === 0 && <div className="text-slate-600">等待开局...</div>}
+            </div>
+          </div>
+        )}
+        {isAITurn && aiSide !== 'sm-german' && aiSide !== 'sm-british' && (
           <div className="w-full lg:w-80 space-y-2">
             <div className="bg-slate-800 border border-purple-700 rounded-lg p-3">
               <div className="flex items-center gap-2 mb-2">
@@ -923,7 +1132,7 @@ export default function App() {
       <GameLogPanel log={log} visible={showLog} onToggle={() => setShowLog(!showLog)} />
 
       {/* 调试终端 */}
-      {showDebug && (
+      {showDebug && aiSide !== 'sm-german' && aiSide !== 'sm-british' && (
         <div className="fixed bottom-8 left-2 right-2 z-50 bg-black/90 border border-green-600 rounded-lg shadow-2xl" style={{ maxHeight: '35vh' }}>
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-green-800 bg-green-950/50 rounded-t-lg">
             <span className="text-green-400 font-bold text-xs font-mono">🖥 AI 调试终端</span>

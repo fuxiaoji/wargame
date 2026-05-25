@@ -1,6 +1,6 @@
 import { GameState, ShipState } from './types'
 import { createGameState, BRITISH_FIXED_POSITIONS } from './setup'
-import { labelToHex, isLand, hexEquals, hexDistance, hexToLabel } from './map'
+import { labelToHex, isLand, hexEquals, hexDistance, hexToLabel, GERMAN_START_HEXES } from './map'
 import { Randomizer, DefaultRandom, SeededRandom } from './random'
 import {
   validateGermanMove,
@@ -87,6 +87,8 @@ export class BismarckGame {
     const coord = labelToHex(label)
     if (!coord) return { ok: false, error: `无效格号: ${label}` }
     if (isLand(coord)) return { ok: false, error: `${label} 是陆地块` }
+    // 德军初设格不可部署英军
+    if (GERMAN_START_HEXES.includes(label)) return { ok: false, error: `${label} 是德军初始格` }
 
     const ship = this.state.britishShips.find(s => s.def.id === shipId)
     if (!ship) return { ok: false, error: `找不到算子: ${shipId}` }
@@ -231,6 +233,7 @@ export class BismarckGame {
     // 注意：bismarckFound 一旦为 true 就不再清除——规则 5.1，发现后所有英军永久解锁
     this.state.combatPending = false
     this.state.transportRevealedHex = null  // 标记已在英军移动阶段展示过，清除
+    this.state.airSearchDone = false
     this.state.phase = 'british-search'
     return { ok: true }
   }

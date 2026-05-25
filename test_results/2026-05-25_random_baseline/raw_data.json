@@ -1,0 +1,50 @@
+[
+  {
+    "v": "V1",
+    "mode": "无传播",
+    "gerSmartWR": 0.5333333333333333,
+    "britSmartWR": 0.3
+  },
+  {
+    "v": "V1",
+    "mode": "仅负值传播",
+    "gerSmartWR": 0.8333333333333334,
+    "britSmartWR": 0.2
+  },
+  {
+    "v": "V2",
+    "mode": "无传播",
+    "gerSmartWR": 0.5333333333333333,
+    "britSmartWR": 0.3
+  },
+  {
+    "v": "V2",
+    "mode": "仅负值传播",
+    "gerSmartWR": 0.5333333333333333,
+    "britSmartWR": 0.23333333333333334
+  },
+  {
+    "v": "V3",
+    "mode": "无传播",
+    "gerSmartWR": 0.5666666666666667,
+    "britSmartWR": 0.2
+  },
+  {
+    "v": "V3",
+    "mode": "仅负值传播",
+    "gerSmartWR": 0.5333333333333333,
+    "britSmartWR": 0.3
+  },
+  {
+    "v": "V4",
+    "mode": "无传播",
+    "gerSmartWR": 0.6666666666666666,
+    "britSmartWR": 0.36666666666666664
+  },
+  {
+    "v": "V4",
+    "mode": "仅负值传播",
+    "gerSmartWR": 0.5333333333333333,
+    "britSmartWR": 0.3333333333333333
+  }
+]

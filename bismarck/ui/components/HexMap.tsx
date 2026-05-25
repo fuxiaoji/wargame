@@ -15,6 +15,7 @@ interface HexMapProps {
   mapOffY?: number
   tokenScale?: number
   zoom?: number
+  heatmapData?: Float32Array | null
   selectedShip?: string | null
   displayMode?: 'token' | 'sprite'
 }
@@ -62,7 +63,15 @@ function drawHexGrid(
   highlightedHexes: Set<string>,
   selectedHex: string | null,
   transportRevealedHex: string | null,
+  heatmapData?: Float32Array | null,
 ) {
+  // 热力图 min/max
+  let hMin = 0, hMax = 0
+  if (heatmapData) {
+    for (let i = 0; i < 48; i++) { if (heatmapData[i] < hMin) hMin = heatmapData[i]; if (heatmapData[i] > hMax) hMax = heatmapData[i] }
+    if (hMax - hMin < 0.01) hMax = hMin + 1 // 避免除零
+  }
+
   for (const cell of cells) {
     const p = labelToPixel(cell.label)
     if (!p) continue
@@ -81,6 +90,25 @@ function drawHexGrid(
     for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y)
     ctx.closePath()
     ctx.fillStyle = fill; ctx.fill()
+
+    // 热力图叠加
+    if (heatmapData) {
+      const q = cell.label.charCodeAt(0) - 65
+      const r = parseInt(cell.label.slice(1)) - 1
+      if (q >= 0 && q < 6 && r >= 0 && r < 8) {
+        const v = heatmapData[r * 6 + q]
+        const t = (v - hMin) / (hMax - hMin) // 0~1
+        // 蓝(-) → 白(0) → 红(+)
+        const r2 = Math.round(t * 255)
+        const b2 = Math.round((1 - t) * 255)
+        const alpha = Math.min(0.35, Math.abs(v) / (Math.max(Math.abs(hMin), Math.abs(hMax)) + 1) * 0.5)
+        ctx.beginPath()
+        ctx.moveTo(corners[0].x, corners[0].y)
+        for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y)
+        ctx.closePath()
+        ctx.fillStyle = `rgba(${r2},0,${b2},${alpha.toFixed(2)})`; ctx.fill()
+      }
+    }
 
     const stroke = isTransport ? 'rgba(255,80,70,0.7)' : isSel ? '#fbbf24' : isHl ? '#34d399' : 'rgba(255,255,255,0.15)'
     const lw = isTransport ? 2 : isSel ? 2.5 : isHl ? 2 : 0.5
@@ -188,7 +216,7 @@ function collectTokens(gameState: GameState, showGermanPositions: boolean): Toke
 export function HexMap({
   gameState, highlightedHexes, selectedHex, showGermanPositions, transportRevealedHex,
   onHexClick, mapScale, mapOffX, mapOffY, tokenScale = 1, zoom = 1, selectedShip = null,
-  displayMode = 'sprite',
+  displayMode = 'sprite', heatmapData = null,
 }: HexMapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const mapImgRef = useRef<HTMLImageElement | null>(null)
@@ -243,14 +271,14 @@ export function HexMap({
       ctx.fillText('德军起始区 (A5/A6/B7)', 1050, 20)
     }
 
-    drawHexGrid(ctx, getAllHexCells(), highlightedHexes, selectedHex, transportRevealedHex)
+    drawHexGrid(ctx, getAllHexCells(), highlightedHexes, selectedHex, transportRevealedHex, heatmapData)
 
     const tokens = collectTokens(gameState, showGermanPositions)
     for (const t of tokens) {
       const ship = [...gameState.britishShips, ...gameState.germanShips].find(s => s.def.id === t.shipId)
       if (ship) drawToken(ctx, t.px, t.py, ship, t.stackIdx, t.stackTotal, tokenScale, showGermanPositions)
     }
-  }, [gameState, highlightedHexes, selectedHex, showGermanPositions, imgLoaded, mapScale, mapOffX, mapOffY, tokenScale, transportRevealedHex])
+  }, [gameState, highlightedHexes, selectedHex, showGermanPositions, imgLoaded, mapScale, mapOffX, mapOffY, tokenScale, transportRevealedHex, heatmapData])
 
   useEffect(() => { const c = canvasRef.current; if (c) drawFrame(c) }, [drawFrame])
 

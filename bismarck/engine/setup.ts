@@ -60,6 +60,7 @@ export function createGameState(_rng?: Randomizer): GameState {
     germanPositionPublic: false,
     failedDummies: new Set(),
     transportRevealedHex: null,
+    airSearchDone: false,
 
     gameOver: false,
     winner: null,

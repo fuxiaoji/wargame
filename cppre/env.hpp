@@ -238,14 +238,16 @@ public:
         }
 
         if (s.phase == Phase::british_search) {
-            // 航空索敌优先执行（在同格索敌之前）
-            auto arkIt = std::find_if(s.britishShips.begin(), s.britishShips.end(),
-                [](const ShipState& sh) { return sh.def.id == "ark-royal" && sh.steps > 0; });
-            if (arkIt != s.britishShips.end()) {
-                auto posIt = s.britishPositions.find("ark-royal");
-                if (posIt != s.britishPositions.end()) {
-                    for (const auto& label : getAirSearchTargets(posIt->second))
-                        actions.push_back({nextId++, ActionType::AirSearch, "航空索敌: " + label, "", label});
+            // 航空索敌优先执行（在同格索敌之前），每回合限一次
+            if (!s.airSearchDone) {
+                auto arkIt = std::find_if(s.britishShips.begin(), s.britishShips.end(),
+                    [](const ShipState& sh) { return sh.def.id == "ark-royal" && sh.steps > 0; });
+                if (arkIt != s.britishShips.end()) {
+                    auto posIt = s.britishPositions.find("ark-royal");
+                    if (posIt != s.britishPositions.end()) {
+                        for (const auto& label : getAirSearchTargets(posIt->second))
+                            actions.push_back({nextId++, ActionType::AirSearch, "航空索敌: " + label, "", label});
+                    }
                 }
             }
             actions.push_back({nextId++, ActionType::FinishPhase, "执行同格索敌", "", ""});
@@ -292,6 +294,7 @@ public:
             break;
         case ActionType::AirSearch:
             if (!action.targetLabel.empty()) game.doAirSearch(action.targetLabel);
+            game.state.airSearchDone = true;
             break;
         case ActionType::Combat:
             game.doCombat();

@@ -9,7 +9,7 @@ export function useGame(log?: import('../../engine/log').GameLog) {
   const gameRef = useRef(new BismarckGame(undefined, log))
   const game = gameRef.current
 
-  const [, setState] = useState<GameState>({ ...game.state })
+  const [state, setState] = useState<GameState>({ ...game.state })
   const refresh = useCallback(() => {
     setState({ ...game.state })
   }, [game])
@@ -179,7 +179,7 @@ export function useGame(log?: import('../../engine/log').GameLog) {
   return {
     // state
     game,
-    gameState: game.state,
+    gameState: state,
     // UI state
     selectedHex,
     setSelectedHex,

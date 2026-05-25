@@ -12,9 +12,7 @@
 #include <unordered_map>
 
 struct Weights {
-    float w1=8,w2=3,w3=2,w4=4, w5=3,w6=2,w7=2,w8=1, w9=4,w10=2,w11=2, w12=1,w13=2,w14=1,w15=2;
-    float rushF7Pull=-10, rushPathPull=1.0f, farmBasePull=2, farmVPScale=0.5f;
-    float huntPull=3, hidePush=8, rushVPPenalty=4.0f;
+    float w1=8,w2=3,w3=2,w4=4, w5=2,w6=2,w7=2,w8=1, w9=4,w10=2,w11=2, w12=1,w13=2,w14=1,w15=2;
     float s1=10,s2=0.5f,s3=1, h1=10,h2=5,h3=3, p1=3,p2=2,p3=2, d1=5,d2=3,d3=4;
     float temperature = 1.0f;
 };
@@ -176,7 +174,7 @@ struct GermanBrain {
 
         float vpNeed = std::max(0.0f, 6.0f - st.vp.german);
         float rush = w.w1 * std::max(0.0f, (8.0f - distF7) / 8.0f) + w.w2*(curShip->steps/(float)curShip->def.maxSteps)
-                   + w.w3*(1-britNearF7/5.0f) - w.w4*(st.bismarckFound?2:0) - vpNeed * w.rushVPPenalty;
+                   + w.w3*(1-britNearF7/5.0f) - w.w4*(st.bismarckFound?2:0) - vpNeed * 1.5f;
         float farm = w.w5*(onRoute?1:0) + w.w6*(1-st.vp.german/6.0f) + w.w7*(st.bismarckFound?0:1) + w.w8*0.3f;
         // 计算孤立英军目标 (德军所见均为"?", 不区分真船/伪装)
         int isolatedTargets = 0;
@@ -210,53 +208,33 @@ struct GermanBrain {
 
         // 策略修正热力图
         if (lastStrategy == "rush") {
-            hm.set(6,5, hm.get(6,5) + w.rushF7Pull);
-            for (auto& nb : hexNeighbors(f7)) { auto nl = hexToLabel(nb); if (nl) { auto [r,c]=rcOf(*nl); if (r>=0) hm.set(r,c,hm.get(r,c)+w.rushF7Pull*0.5f); } }
+            hm.set(6,5, hm.get(6,5)-10);
+            for (auto& nb : hexNeighbors(f7)) { auto nl = hexToLabel(nb); if (nl) { auto [r,c]=rcOf(*nl); if (r>=0) hm.set(r,c,hm.get(r,c)-5); } }
+            // 冲港路径引导点
             { const char* wp[] = {"D8","E7","F6","D6","C6","C7"}; float wv[] = {-4,-5,-7,-3,-2,-2};
-              for (int i=0;i<6;i++) { auto [r,c]=rcOf(wp[i]); if (r>=0) hm.set(r,c,hm.get(r,c)+wv[i]*w.rushPathPull); } }
+              for (int i=0;i<6;i++) { auto [r,c]=rcOf(wp[i]); if (r>=0) hm.set(r,c,hm.get(r,c)+wv[i]); } }
         } else if (lastStrategy == "farm") {
-            float farmPull = -(w.farmBasePull + (6 - st.vp.german) * w.farmVPScale);
+            float farmPull = -(2.0f + (6 - st.vp.german) * 0.5f); // VP越少拉力越强
             for (auto& l : {"D2","D3","C3","C4","D5","E1","E4","E5"}) { auto [r,c]=rcOf(l); if (r>=0) hm.set(r,c,hm.get(r,c)+farmPull); }
-        } else if (lastStrategy == "hunt") {
-            // 主动猎杀: 孤立英军目标周围吸引
-            for (auto& sh : st.britishShips) {
-                if (sh.steps <= 0) continue;
-                auto pit = st.britishPositions.find(sh.def.id); if (pit==st.britishPositions.end()) continue;
-                int nearby=0;
-                for (auto& sh2 : st.britishShips) { if(sh2.steps>0&&sh2.def.id!=sh.def.id){auto p2=st.britishPositions.find(sh2.def.id);if(p2!=st.britishPositions.end()&&hexDistance(pit->second,p2->second)<=3)nearby++;} }
-                if (nearby==0) {
-                    for (int r=0;r<8;r++) for (int c=0;c<6;c++) {
-                        float d = hexDistance(pit->second, {c,r});
-                        hm.add(r,c, -w.huntPull/(1+d));
-                    }
-                }
-            }
         } else if (lastStrategy == "hide") {
             for (auto& sh : st.britishShips) {
                 if (sh.steps <= 0) continue;
                 auto pit = st.britishPositions.find(sh.def.id); if (pit==st.britishPositions.end()) continue;
                 for (int dr=-3; dr<=3; dr++) for (int dc=-3; dc<=3; dc++)
-                    hm.add(pit->second.r+dr, pit->second.q+dc, w.hidePush);
+                    hm.add(pit->second.r+dr, pit->second.q+dc, 8);
             }
         }
 
         // 防死锁
         for (auto& a : actions) if (a.type == ActionType::Move && !a.targetLabel.empty()) hm.applyAntiStuck(a.targetLabel);
 
-        // 得分 = -heat (neg传播: 远处负值贡献)
+        // 得分 = -heat
         std::vector<int> moveIds; std::vector<float> moveScores;
         for (auto& a : actions) {
             if (a.type != ActionType::Move) continue;
             auto [r,c] = rcOf(a.targetLabel);
-            if (r<0) { moveIds.push_back(a.id); moveScores.push_back(0); continue; }
-            float base = -hm.get(r,c), bonus = 0;
-            for (int pr=0;pr<8;pr++) for (int pc=0;pc<6;pc++) {
-                float v = hm.data[pr][pc]; if (v >= 0) continue;
-                float d = std::abs(pr-r) + std::abs(pc-c);
-                if (d > 0) bonus += -v / ((1+d)*(1+d));
-            }
             moveIds.push_back(a.id);
-            moveScores.push_back(base + bonus + ((float)std::rand()/RAND_MAX-0.5f)*0.1f);
+            moveScores.push_back((r>=0) ? -hm.get(r,c) + ((float)std::rand()/RAND_MAX-0.5f)*0.1f : 0);
         }
         if (!moveIds.empty()) {
             int pick = weightedPick(moveScores, 0.5f);
@@ -398,15 +376,8 @@ struct BritishBrain {
             for (auto& a : actions) {
                 if (a.type != ActionType::Move) continue;
                 auto [r,c] = rcOf(a.targetLabel);
-                if (r<0) { moveIds.push_back(a.id); moveScores.push_back(0); continue; }
-                float base = -hm.get(r,c), bonus = 0;
-                for (int pr=0;pr<8;pr++) for (int pc=0;pc<6;pc++) {
-                    float v = hm.data[pr][pc]; if (v >= 0) continue;
-                    float d = std::abs(pr-r) + std::abs(pc-c);
-                    if (d > 0) bonus += -v / ((1+d)*(1+d));
-                }
                 moveIds.push_back(a.id);
-                moveScores.push_back(base + bonus + ((float)std::rand()/RAND_MAX-0.5f)*0.2f);
+                moveScores.push_back((r>=0) ? -hm.get(r,c) + ((float)std::rand()/RAND_MAX-0.5f)*0.2f : 0);
             }
             if (!moveIds.empty()) {
                 int pick = weightedPick(moveScores, 0.6f);

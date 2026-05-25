@@ -85,6 +85,9 @@ export interface GameState {
   // 本回合已移动过的舰船
   movedThisTurn: Set<string>
 
+  // 本回合是否已执行航空索敌（每回合限一次）
+  airSearchDone: boolean
+
   // 运输攻击信号泄露暴露的位置（英军移动阶段可见）
   transportRevealedHex: string | null
 

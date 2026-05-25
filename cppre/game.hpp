@@ -66,6 +66,9 @@ public:
         auto coord = labelToHex(label);
         if (!coord) return {false, "无效格号: " + label};
         if (isLand(*coord)) return {false, label + " 是陆地格"};
+        // 德军初设格不可部署英军
+        if (std::find(GERMAN_START_HEXES.begin(), GERMAN_START_HEXES.end(), label) != GERMAN_START_HEXES.end())
+            return {false, label + " 是德军初始格"};
 
         auto it = std::find_if(state.britishShips.begin(), state.britishShips.end(),
             [&](const ShipState& s) { return s.def.id == shipId; });
@@ -192,6 +195,7 @@ public:
         // bismarckFound 一旦为 true 就不再清除——规则 5.1，发现后所有英军永久解锁
         state.combatPending = false;
         state.transportRevealedHex = std::nullopt;  // 英军已看到标记，清除
+        state.airSearchDone = false;
         state.phase = Phase::british_search;
         return {true, ""};
     }

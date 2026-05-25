@@ -1,6 +1,7 @@
-/** C++ 高速锦标赛引擎 — 多线程 + 向量化 */
+/** C++ V3 锦标赛引擎 — 多线程 + 分级张量记录 */
 #include "state_machine.hpp"
 #include "env.hpp"
+#include "tensor_logger.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -9,10 +10,25 @@
 #include <numeric>
 #include <thread>
 #include <atomic>
+#include <deque>
 #include <sys/stat.h>
 using namespace std;
 
 struct WeightSet { Weights w; };
+
+// ===== 扩展游戏结果 =====
+struct GameResult {
+    int gi, bi, gerWins, britWins;
+    int rush=0, farm=0, hunt=0, hide=0;
+    int vpGer=0, vpBrit=0, turns=0, totalSteps=0;
+    bool isClose=false;
+    string dominantStrategy;
+};
+
+struct PairResults {
+    int gi, bi, gerWins=0, britWins=0;
+    vector<GameResult> games;
+};
 
 // ===== JSON 工具 =====
 template<typename T> T getN(const string& j, const string& k, T d) {
@@ -35,16 +51,40 @@ string weightsToJson(const Weights& w) {
     j<<"\"s1\":"<<w.s1<<",\"s2\":"<<w.s2<<",\"s3\":"<<w.s3<<",";
     j<<"\"h1\":"<<w.h1<<",\"h2\":"<<w.h2<<",\"h3\":"<<w.h3<<",";
     j<<"\"d1\":"<<w.d1<<",\"d2\":"<<w.d2<<",\"d3\":"<<w.d3<<",";
+    j<<"\"p1\":"<<w.p1<<",\"p2\":"<<w.p2<<",\"p3\":"<<w.p3<<",";
+    j<<"\"rushF7Pull\":"<<w.rushF7Pull<<",\"rushPathPull\":"<<w.rushPathPull<<",";
+    j<<"\"farmBasePull\":"<<w.farmBasePull<<",\"farmVPScale\":"<<w.farmVPScale<<",";
+    j<<"\"huntPull\":"<<w.huntPull<<",\"hidePush\":"<<w.hidePush<<",\"rushVPPenalty\":"<<w.rushVPPenalty<<",";
     j<<"\"temperature\":"<<w.temperature<<"}";
     return j.str();
 }
 
-// ===== 超快游戏 (无堆分配) =====
-struct StratCount { int rush=0, farm=0, hunt=0, hide=0; };
-static bool runOneGame(const Weights& gerW, const Weights& britW, StratCount& sc) {
+string padGen(int gen) { return gen < 10 ? "00" + to_string(gen) : (gen < 100 ? "0" + to_string(gen) : to_string(gen)); }
+
+string gameResultJson(const GameResult& gr) {
+    ostringstream j;
+    j << "{\"gi\":"<<gr.gi<<",\"bi\":"<<gr.bi
+      <<",\"gerWins\":"<<gr.gerWins<<",\"britWins\":"<<gr.britWins
+      <<",\"rush\":"<<gr.rush<<",\"farm\":"<<gr.farm<<",\"hunt\":"<<gr.hunt<<",\"hide\":"<<gr.hide
+      <<",\"vpGer\":"<<gr.vpGer<<",\"vpBrit\":"<<gr.vpBrit
+      <<",\"turns\":"<<gr.turns<<",\"steps\":"<<gr.totalSteps
+      <<",\"close\":"<<(gr.isClose?"true":"false")
+      <<",\"strategy\":\""<<gr.dominantStrategy<<"\"}";
+    return j.str();
+}
+
+// ===== 单局游戏 (可选张量记录) =====
+static GameResult runOneGame(const Weights& gerW, const Weights& britW,
+                              int gi, int bi, int seed, bool recordTensor,
+                              const string& tensorDir, const string& gameId) {
+    srand(seed);
     GermanBrain ger(gerW); BritishBrain brit(britW);
     BismarckEnv env;
     int steps = 0, stuck = 0; Phase lastPhase = Phase::game_over;
+    int rush=0, farm=0, hunt=0, hide=0;
+
+    vector<float> stateBuf; vector<ActionRecord> actions;
+    if (recordTensor) stateBuf.resize(T * C * H * W);
 
     while (!env.game.state.gameOver && steps < 500) {
         auto obs = env.getFastObservation();
@@ -58,23 +98,57 @@ static bool runOneGame(const Weights& gerW, const Weights& britW, StratCount& sc
             continue;
         }
 
+        if (recordTensor && steps < T) {
+            TensorLoggerState tracker;
+            ShipSide viewer = (obs.activePlayer == ShipSide::german || obs.phase == Phase::setup_german)
+                ? ShipSide::german : ShipSide::british;
+            fillStateSlice(&stateBuf[steps * C * H * W], env.game.state, viewer, &tracker);
+            ActionRecord rec{};
+            rec.step_index = (uint8_t)steps;
+            rec.side = (uint8_t)obs.activePlayer;
+            actions.push_back(rec);
+        }
+
         if (obs.phase == Phase::setup_british) {
-            const char* dh[] = {"E5","E3","D5","C7","B6","F6","F5","F3","F2","E1","D1","C1"};
-            const char* hs[] = {"E7","E6","E5","E3","E2","E1","D7","D5","D1","C7","C1","B6","F6","F5","F3","F2"};
-            for (auto& sh : env.game.state.britishShips)
-                if (sh.def.isDummy && !env.game.state.britishPositions.count(sh.def.id))
-                    env.game.placeBritishToken(sh.def.id, dh[rand()%12]);
+            unordered_set<string> usedHexes(GERMAN_START_HEXES.begin(), GERMAN_START_HEXES.end());
+            for (const auto& [hex, shipIds] : BRITISH_FIXED_POSITIONS) {
+                usedHexes.insert(hex);
+                for (const auto& id : shipIds) env.game.placeBritishToken(id, hex);
+            }
+            // 使用引擎自带 reachable 计算，替代手写 BFS
+            unordered_set<string> reachable;
+            ShipState dummyShip;
+            dummyShip.def.speed = 2; dummyShip.steps = 2;
+            for (const auto& label : GERMAN_START_HEXES) {
+                auto h = labelToHex(label); if (!h) continue;
+                for (const auto& l : getGermanReachableLabels(*h, dummyShip)) {
+                    if (!usedHexes.count(l)) reachable.insert(l);
+                }
+            }
+            auto placeFree = [&](bool isDummy) {
+                for (auto& sh : env.game.state.britishShips) {
+                    if (sh.def.isDummy != isDummy || env.game.state.britishPositions.count(sh.def.id)) continue;
+                    vector<string> avail;
+                    for (const auto& h : reachable) if (!usedHexes.count(h)) avail.push_back(h);
+                    if (!avail.empty()) {
+                        const auto& picked = avail[rand() % avail.size()];
+                        env.game.placeBritishToken(sh.def.id, picked);
+                        usedHexes.insert(picked);
+                    }
+                }
+            };
+            placeFree(false); placeFree(true);
+            const char* fallback[] = {"E7","E5","E3","E2","E1","D8","D5","D4","D3","D2","D1","C7","C1","B6","F6","F5","F3","F2","A3","A4","B4"};
             for (auto& sh : env.game.state.britishShips)
                 if (!env.game.state.britishPositions.count(sh.def.id))
-                    env.game.placeBritishToken(sh.def.id, hs[rand()%16]);
+                    env.game.placeBritishToken(sh.def.id, fallback[rand()%21]);
             env.game.finishSetup(); steps++; continue;
         }
 
-        // 追踪策略
         if (obs.activePlayer == ShipSide::german && obs.phase == Phase::german_move) {
             string& s = ger.lastStrategy;
-            if (s == "rush") sc.rush++; else if (s == "farm") sc.farm++;
-            else if (s == "hunt") sc.hunt++; else if (s == "hide") sc.hide++;
+            if (s == "rush") rush++; else if (s == "farm") farm++;
+            else if (s == "hunt") hunt++; else if (s == "hide") hide++;
         }
 
         string phStr = phName(obs.phase);
@@ -87,31 +161,65 @@ static bool runOneGame(const Weights& gerW, const Weights& britW, StratCount& sc
         } else if (!obs.actions.empty()) env.step(obs.actions[0]);
         steps++;
     }
-    return env.game.state.winner && *env.game.state.winner == ShipSide::german;
+
+    bool gerWin = env.game.state.winner && *env.game.state.winner == ShipSide::german;
+    GameResult gr;
+    gr.gi = gi; gr.bi = bi;
+    gr.gerWins = gerWin ? 1 : 0; gr.britWins = gerWin ? 0 : 1;
+    gr.rush = rush; gr.farm = farm; gr.hunt = hunt; gr.hide = hide;
+    gr.vpGer = env.game.state.vp.german; gr.vpBrit = env.game.state.vp.british;
+    gr.turns = env.game.state.turn; gr.totalSteps = steps;
+    gr.isClose = (abs(gr.vpGer - gr.vpBrit) <= 1) || (gr.turns >= 17);
+    for (auto& sh : env.game.state.germanShips)
+        if (sh.def.id=="bismarck" && sh.steps<=0) gr.isClose = true;
+
+    int maxStrat = max({rush, farm, hunt, hide});
+    if (maxStrat == rush) gr.dominantStrategy = "rush";
+    else if (maxStrat == farm) gr.dominantStrategy = "farm";
+    else if (maxStrat == hunt) gr.dominantStrategy = "hunt";
+    else gr.dominantStrategy = "hide";
+
+    if (recordTensor && !tensorDir.empty()) {
+        GameLogResult res;
+        res.winner = gerWin ? "german" : "british";
+        res.vp_german = gr.vpGer; res.vp_british = gr.vpBrit;
+        res.turns = gr.turns; res.total_steps = steps; res.seed = seed;
+        writeGameLog(tensorDir, gameId, stateBuf, actions, res);
+    }
+    return gr;
 }
 
-// ===== 无锁线程工作 (静态分配) =====
-struct JobResult { int gi, bi, gerWins, britWins, rush, farm, hunt, hide; };
-
+// ===== 无锁线程工作 =====
 void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
                  const vector<WeightSet>& gerP, const vector<WeightSet>& britP,
-                 int GPP, vector<JobResult>& results, atomic<int>& done, int total,
-                 vector<vector<int>>& gerStrats) {  // 线程局部策略计数
+                 int GPP, int gen, const string& tensorDir,
+                 vector<PairResults>& results, atomic<int>& done, int total) {
     for (int idx = start; idx < end; idx++) {
         auto [gi, bi] = pairs[idx];
+        PairResults pr; pr.gi = gi; pr.bi = bi;
         int gerW = 0, britW = 0;
-        StratCount sc;
         for (int g = 0; g < GPP; g++) {
             bool swap = g >= GPP / 2;
-            bool win = swap ? runOneGame(britP[bi].w, gerP[gi].w, sc) : runOneGame(gerP[gi].w, britP[bi].w, sc);
-            if (!swap) { if (win) gerW++; else britW++; }
-            else { if (win) britW++; else gerW++; }
+            // gen0 抽样2000局 (10%): 每对的前1局 + 额外随机
+            bool record = (gen==0) && (rand()%100 < 10);  // ~2000局 gen0 张量
+            string tid, gid;
+            if (record) {
+                tid = tensorDir + "/gen_000"; mkdir(tid.c_str(), 0755);
+                gid = "g" + to_string(gi) + "_b" + to_string(bi) + "_" + to_string(g);
+            }
+            int seed = (gen+1)*100000 + gi*1000 + bi*50 + g + (swap?500000:0);
+            GameResult gr = swap
+                ? runOneGame(britP[bi].w, gerP[gi].w, bi, gi, seed, record, tid, gid)
+                : runOneGame(gerP[gi].w, britP[bi].w, gi, bi, seed, record, tid, gid);
+            if (!swap) { gerW += gr.gerWins; britW += gr.britWins; }
+            else { gerW += gr.britWins; britW += gr.gerWins; }
+            pr.games.push_back(gr);
         }
-        results.push_back({gi, bi, gerW, britW, sc.rush, sc.farm, sc.hunt, sc.hide});
+        pr.gerWins = gerW; pr.britWins = britW;
+        results.push_back(pr);
         int d = ++done;
-        if (d % max(1, total/20) == 0) {
+        if (d % max(1, total/20) == 0)
             cout << "\r  " << (d*100/total) << "% " << d << "/" << total << flush;
-        }
     }
 }
 
@@ -119,9 +227,9 @@ void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
 void mutateAll(Weights& w, float scale) {
     float* ptr = &w.w1; int count = sizeof(Weights) / sizeof(float);
     for (int i = 0; i < count; i++) {
-        if ((float)rand()/RAND_MAX < 0.3f) {
+        if ((float)rand()/RAND_MAX < 0.5f) {  // 50% 变异率
             float& val = *(ptr + i);
-            val = max(0.1f, val + ((float)rand()/RAND_MAX - 0.5f) * scale);
+            val = max(0.2f, val + ((float)rand()/RAND_MAX - 0.5f) * scale);  // 下限 0.2
         }
     }
 }
@@ -132,22 +240,26 @@ int main(int argc, char** argv) {
     int POP = argc > 2 ? stoi(argv[2]) : 10;
     int GPP = argc > 3 ? stoi(argv[3]) : 100;
     int THREADS = argc > 4 ? stoi(argv[4]) : thread::hardware_concurrency();
-    string outDir = argc > 5 ? argv[5] : "/Users/Zhuanz1/Desktop/code/wargame/tournament";
+    string outDir = argc > 5 ? argv[5] : "/Users/Zhuanz1/Desktop/code/wargame/deeplearn/data/training_v3";
 
     mkdir(outDir.c_str(), 0755);
-    cout << "C++ 锦标赛: " << GEN << "代 × " << POP << "×" << POP << " × " << GPP << "局 | " << THREADS << "线程\n";
+    cout << "V3 锦标赛: " << GEN << "代 × " << POP << "×" << POP << " × " << GPP << "局 | " << THREADS << "线程\n";
     long totalPerGen = (long)POP * POP * GPP;
-    cout << "总局数/代: " << totalPerGen / 1000 << "K\n\n";
+    cout << "总局数/代: " << totalPerGen/1000 << "K | 总计: " << (totalPerGen*GEN)/10000 << "万局\n\n";
+
+    ofstream cfg(outDir + "/run_config.json");
+    cfg << "{\"gen\":"<<GEN<<",\"pop\":"<<POP<<",\"gpp\":"<<GPP
+        <<",\"threads\":"<<THREADS<<",\"timestamp\":"<<time(nullptr)<<"}";
 
     vector<WeightSet> gerPop(POP), britPop(POP);
     vector<int> gerWins(POP), gerTotal(POP), britWins(POP), britTotal(POP);
-    // MAP-Elites: 策略追踪 [个体][4策略]
     vector<vector<int>> gerStrats(POP, vector<int>(4, 0));
+    vector<float> gerWinHist, britWinHist, diversityHist;
+    vector<string> strategyHist;
 
-    // 初始化
     for (int i = 0; i < POP; i++) {
         gerPop[i].w = Weights{}; britPop[i].w = Weights{};
-        if (i > 0) { mutateAll(gerPop[i].w, 4.0f); mutateAll(britPop[i].w, 4.0f); }
+        if (i > 0) { mutateAll(gerPop[i].w, 6.0f); mutateAll(britPop[i].w, 6.0f); }
     }
 
     for (int gen = 0; gen < GEN; gen++) {
@@ -156,142 +268,252 @@ int main(int argc, char** argv) {
         fill(britWins.begin(), britWins.end(), 0); fill(britTotal.begin(), britTotal.end(), 0);
         for (auto& s : gerStrats) fill(s.begin(), s.end(), 0);
 
-        // 构建配对列表
+        string genDir = outDir + "/gen_" + padGen(gen);
+        mkdir(genDir.c_str(), 0755);
+        string resDir = genDir + "/results"; mkdir(resDir.c_str(), 0755);
+
         vector<pair<int,int>> pairs;
         for (int gi = 0; gi < POP; gi++)
             for (int bi = 0; bi < POP; bi++)
                 pairs.emplace_back(gi, bi);
 
-        // 启动线程 (静态分配，无锁，带进度)
         vector<thread> threads;
-        vector<vector<JobResult>> threadResults(THREADS);
+        vector<vector<PairResults>> threadResults(THREADS);
         atomic<int> completedPairs{0};
         int totalPairs = pairs.size();
         int chunk = (totalPairs + THREADS - 1) / THREADS;
         for (int t = 0; t < THREADS; t++) {
             int s = t * chunk, e = min(s + chunk, totalPairs);
             if (s < e) threads.emplace_back([&, t, s, e]() {
-                runJobRange(s, e, pairs, gerPop, britPop, GPP, threadResults[t], completedPairs, totalPairs, gerStrats);
+                runJobRange(s, e, pairs, gerPop, britPop, GPP, gen, outDir, threadResults[t], completedPairs, totalPairs);
             });
         }
         for (auto& th : threads) th.join();
         cout << "\r  " << flush;
 
-        // 汇总结果
+        // 汇总 + Tier 0 写 per-pair results
+        int totalClose=0, totalGames=0;
+        float sumVpGer=0, sumVpBrit=0, sumTurns=0;
         for (auto& tr : threadResults) {
-            for (auto& r : tr) {
-                gerWins[r.gi] += r.gerWins; gerTotal[r.gi] += GPP;
-                britWins[r.bi] += r.britWins; britTotal[r.bi] += GPP;
-                gerStrats[r.gi][0] += r.rush; gerStrats[r.gi][1] += r.farm;
-                gerStrats[r.gi][2] += r.hunt; gerStrats[r.gi][3] += r.hide;
+            for (auto& pr : tr) {
+                string pf = resDir + "/pair_g" + to_string(pr.gi) + "_b" + to_string(pr.bi) + ".json";
+                ofstream pfs(pf);
+                pfs << "[";
+                for (size_t gi=0; gi<pr.games.size(); gi++) {
+                    if (gi) pfs << ",";
+                    pfs << gameResultJson(pr.games[gi]);
+                }
+                pfs << "]";
+
+                gerWins[pr.gi]+=pr.gerWins; gerTotal[pr.gi]+=GPP;
+                britWins[pr.bi]+=pr.britWins; britTotal[pr.bi]+=GPP;
+                for (auto& gr : pr.games) {
+                    gerStrats[pr.gi][0]+=gr.rush; gerStrats[pr.gi][1]+=gr.farm;
+                    gerStrats[pr.gi][2]+=gr.hunt; gerStrats[pr.gi][3]+=gr.hide;
+                    if (gr.isClose) totalClose++;
+                    sumVpGer+=gr.vpGer; sumVpBrit+=gr.vpBrit;
+                    sumTurns+=gr.turns; totalGames++;
+                }
             }
         }
 
-        float avgGer = 0, avgBrit = 0;
-        for (int i = 0; i < POP; i++) avgGer += gerTotal[i] > 0 ? (float)gerWins[i] / gerTotal[i] : 0;
-        for (int i = 0; i < POP; i++) avgBrit += britTotal[i] > 0 ? (float)britWins[i] / britTotal[i] : 0;
-        avgGer /= POP; avgBrit /= POP;
-        cout << "\r  代 " << (gen+1) << "/" << GEN
-             << " 德军:" << (int)(avgGer*100) << "% 英军:" << (int)(avgBrit*100)
-             << "% " << (time(nullptr)-startTime) << "s\n";
+        float avgGer=0, avgBrit=0;
+        for (int i=0;i<POP;i++) avgGer+=gerTotal[i]>0?(float)gerWins[i]/gerTotal[i]:0;
+        for (int i=0;i<POP;i++) avgBrit+=britTotal[i]>0?(float)britWins[i]/britTotal[i]:0;
+        avgGer/=POP; avgBrit/=POP;
+        int elapsed=time(nullptr)-startTime;
 
-        // 保存 checkpoint + 本代种群
-        string genDir = outDir + "/gen_" + (gen < 10 ? "00" : gen < 100 ? "0" : "") + to_string(gen);
-        mkdir(genDir.c_str(), 0755);
-        string ckFile = outDir + "/checkpoint_cpp.json";
-        ofstream(ckFile) << "{\"generation\":"<<(gen+1)<<",\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<"}";
+        int bestGer=0, bestBrit=0;
+        float bestGerWR=0, bestBritWR=0;
+        for (int i=0;i<POP;i++) {
+            float gr=gerTotal[i]>0?(float)gerWins[i]/gerTotal[i]:0;
+            float br=britTotal[i]>0?(float)britWins[i]/britTotal[i]:0;
+            if (gr>bestGerWR){bestGerWR=gr;bestGer=i;}
+            if (br>bestBritWR){bestBritWR=br;bestBrit=i;}
+        }
 
-        // 保存德军种群
-        ofstream gerF(genDir + "/ger_population.json");
-        gerF << "["; for (int i=0;i<POP;i++) { if(i)gerF<<","; gerF<<weightsToJson(gerPop[i].w); } gerF<<"]";
+        int totalR=0,totalF=0,totalH=0,totalD=0;
+        for (int i=0;i<POP;i++){totalR+=gerStrats[i][0];totalF+=gerStrats[i][1];totalH+=gerStrats[i][2];totalD+=gerStrats[i][3];}
+        float ttl=totalR+totalF+totalH+totalD+1;
+        float rushPct=(float)totalR/ttl,farmPct=(float)totalF/ttl,huntPct=(float)totalH/ttl,hidePct=(float)totalD/ttl;
 
-        // 保存英军种群
-        ofstream britF(genDir + "/brit_population.json");
-        britF << "["; for (int i=0;i<POP;i++) { if(i)britF<<","; britF<<weightsToJson(britPop[i].w); } britF<<"]";
+        cout << "\r  代"<<(gen+1)<<"/"<<GEN<<" 德:"<<(int)(avgGer*100)<<"% 英:"<<(int)(avgBrit*100)
+             <<"% 焦灼:"<<(totalGames>0?totalClose*100/totalGames:0)<<"% "<<elapsed<<"s\n";
 
-        // 保存统计
-        ofstream statF(genDir + "/stats.json");
-        statF << "{\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<",\"gen\":"<<(gen+1)<<"}";
+        // KL diversity
+        float klMean=0; int klPairs=0;
+        for (int i=0;i<POP;i++) for (int j=i+1;j<POP;j++) {
+            float k=0; const float *pa=&gerPop[i].w.w1,*pb=&gerPop[j].w.w1;
+            for (int x=0;x<(int)(sizeof(Weights)/sizeof(float));x++)
+                if(pa[x]>0.001f&&pb[x]>0.001f) k+=abs(pa[x]*log(pa[x]/pb[x]));
+            klMean+=k; klPairs++;
+        }
+        klMean=klPairs>0?klMean/klPairs:0;
 
-        // === MAP-Elites 5×5 网格淘汰 ===
-        const int G = 5;  // 5×5 grid
-        float gerGridFitness[G][G]; Weights gerGridBest[G][G]; bool gerGridSet[G][G] = {};
+        // Tier 1: 精英对战 (top德 vs top英, 全部50局张量)
+        string eliteDir=genDir+"/elite"; mkdir(eliteDir.c_str(),0755);
+        for (int g=0;g<GPP;g++) {
+            int seed=(gen+1)*900000+g;
+            runOneGame(gerPop[bestGer].w,britPop[bestBrit].w,bestGer,bestBrit,seed,true,eliteDir,"elite_"+to_string(g));
+        }
 
-        auto cellIdx = [G](float rushPct, float farmPct) -> pair<int,int> {
-            int r = min(G-1, max(0, (int)(rushPct * G)));
-            int f = min(G-1, max(0, (int)(farmPct * G)));
-            return {r, f};
-        };
+        // Tier 3: 焦灼局重播 (80局/代)
+        string closeDir=genDir+"/close"; mkdir(closeDir.c_str(),0755);
+        int closeSaved=0;
+        for (auto& tr : threadResults) for (auto& pr : tr) for (auto& gr : pr.games) {
+            if (closeSaved>=80||!gr.isClose) continue;
+            int seed=(gen+1)*700000+closeSaved;
+            runOneGame(gerPop[gr.gi].w,britPop[gr.bi].w,gr.gi,gr.bi,seed,true,closeDir,"close_"+to_string(closeSaved));
+            closeSaved++;
+        }
 
-        // 德军 MAP-Elites: 策略分布 → 网格坐标
-        for (int i = 0; i < POP; i++) {
-            float total = gerStrats[i][0]+gerStrats[i][1]+gerStrats[i][2]+gerStrats[i][3] + 1;
-            float rushPct = (float)gerStrats[i][0] / total;
-            float farmPct = (float)gerStrats[i][1] / total;
-            auto [r, f] = cellIdx(rushPct, farmPct);
-            float wr = gerTotal[i] > 0 ? (float)gerWins[i] / gerTotal[i] : 0;
-            auto kl = [](const Weights& a, const Weights& b) {
-                float k=0; const float *pa=&a.w1,*pb=&b.w1;
-                for(int j=0;j<(int)(sizeof(Weights)/sizeof(float));j++)
-                    if(pa[j]>0.001f&&pb[j]>0.001f) k+=abs(pa[j]*log(pa[j]/pb[j]));
+        // Tier 5: 随机抽样 (80局/代, 德胜英胜各半)
+        string randDir=genDir+"/random"; mkdir(randDir.c_str(),0755);
+        int randGer=0,randBrit=0;
+        for (int k=0;k<400&&(randGer<40||randBrit<40);k++) {
+            int gi=rand()%POP,bi=rand()%POP;
+            int seed=(gen+1)*800000+k;
+            bool gerW=runOneGame(gerPop[gi].w,britPop[bi].w,gi,bi,seed,false,"","").gerWins>0;
+            if(gerW&&randGer>=40)continue; if(!gerW&&randBrit>=40)continue;
+            string gid=(gerW?"ger":"brit")+to_string(gerW?randGer:randBrit);
+            runOneGame(gerPop[gi].w,britPop[bi].w,gi,bi,seed+1,true,randDir,gid);
+            if(gerW)randGer++; else randBrit++;
+        }
+
+        // 种群保存
+        ofstream gerF(genDir+"/ger_population.json");
+        gerF<<"["; for(int i=0;i<POP;i++){if(i)gerF<<",";gerF<<weightsToJson(gerPop[i].w);} gerF<<"]";
+        ofstream britF(genDir+"/brit_population.json");
+        britF<<"["; for(int i=0;i<POP;i++){if(i)britF<<",";britF<<weightsToJson(britPop[i].w);} britF<<"]";
+
+        // 每代个体统计 (KL vs WR 散点图用)
+        ofstream indF(genDir+"/individual_stats.json");
+        indF<<"[";
+        for (int i=0;i<POP;i++) {
+            if (i) indF<<",";
+            float wr=gerTotal[i]>0?(float)gerWins[i]/gerTotal[i]:0;
+            auto kl=[&](int a,int b){
+                float k=0;const float *pa=&gerPop[a].w.w1,*pb=&gerPop[b].w.w1;
+                for(int x=0;x<(int)(sizeof(Weights)/sizeof(float));x++)
+                    if(pa[x]>0.001f&&pb[x]>0.001f)k+=abs(pa[x]*log(pa[x]/pb[x]));
                 return k;
             };
-            float klSum=0; for(int j=0;j<POP;j++) if(i!=j) klSum+=kl(gerPop[i].w,gerPop[j].w);
-            float fit = wr - 0.1f*klSum/(POP-1);
-            if (!gerGridSet[r][f] || fit > gerGridFitness[r][f]) {
-                gerGridFitness[r][f] = fit; gerGridBest[r][f] = gerPop[i].w; gerGridSet[r][f] = true;
-            }
+            float klSum=0;for(int j=0;j<POP;j++)if(i!=j)klSum+=kl(i,j);
+            float t=gerStrats[i][0]+gerStrats[i][1]+gerStrats[i][2]+gerStrats[i][3]+1;
+            indF<<"{\"idx\":"<<i<<",\"wr\":"<<wr<<",\"kl\":"<<klSum/(POP-1)
+                <<",\"rush\":"<<gerStrats[i][0]<<",\"farm\":"<<gerStrats[i][1]
+                <<",\"hunt\":"<<gerStrats[i][2]<<",\"hide\":"<<gerStrats[i][3]<<"}";
         }
+        indF<<"]";
 
-        // 填充空格: 从相邻格变异
-        vector<Weights> newGer;
-        int filled = 0;
-        for (int r = 0; r < G; r++) for (int c = 0; c < G; c++) {
-            if (gerGridSet[r][c]) { newGer.push_back(gerGridBest[r][c]); filled++; }
+        // 每代 Top-3 权重 (权重轨迹图用)
+        vector<int> gerRank(POP), britRank(POP);
+        iota(gerRank.begin(),gerRank.end(),0); iota(britRank.begin(),britRank.end(),0);
+        sort(gerRank.begin(),gerRank.end(),[&](int a,int b){
+            return (gerTotal[a]>0?(float)gerWins[a]/gerTotal[a]:0) > (gerTotal[b]>0?(float)gerWins[b]/gerTotal[b]:0);
+        });
+        sort(britRank.begin(),britRank.end(),[&](int a,int b){
+            return (britTotal[a]>0?(float)britWins[a]/britTotal[a]:0) > (britTotal[b]>0?(float)britWins[b]/britTotal[b]:0);
+        });
+        ofstream topF(genDir+"/top_weights.json");
+        topF<<"{\"top_ger\":[";
+        for (int i=0;i<min(3,POP);i++) {
+            if(i)topF<<","; int idx=gerRank[i];
+            topF<<"{\"idx\":"<<idx<<",\"wr\":"<<(gerTotal[idx]>0?(float)gerWins[idx]/gerTotal[idx]:0)
+                <<",\"weights\":"<<weightsToJson(gerPop[idx].w)<<"}";
         }
-        float anneal = max(0.1f, 1.0f - gen * 0.01f);
-        // 空格从最近已占据格变异
-        for (int r = 0; r < G; r++) for (int c = 0; c < G; c++) {
-            if (gerGridSet[r][c]) continue;
-            // 找最近邻
-            Weights* nearest = nullptr; int bestDist = 999;
-            for (int nr = 0; nr < G; nr++) for (int nc = 0; nc < G; nc++) {
-                if (!gerGridSet[nr][nc]) continue;
-                int d = abs(nr-r)+abs(nc-c);
-                if (d < bestDist) { bestDist = d; nearest = &gerGridBest[nr][nc]; }
-            }
-            if (nearest) {
-                Weights mutant = *nearest; mutateAll(mutant, 3.0f * anneal);
-                newGer.push_back(mutant);
-            }
+        topF<<"],\"top_brit\":[";
+        for (int i=0;i<min(3,POP);i++) {
+            if(i)topF<<","; int idx=britRank[i];
+            topF<<"{\"idx\":"<<idx<<",\"wr\":"<<(britTotal[idx]>0?(float)britWins[idx]/britTotal[idx]:0)
+                <<",\"weights\":"<<weightsToJson(britPop[idx].w)<<"}";
         }
-        // 补足 POP 个
-        while ((int)newGer.size() < POP) {
-            Weights mutant = newGer[rand() % newGer.size()]; mutateAll(mutant, 3.0f * anneal);
-            newGer.push_back(mutant);
-        }
-        // 截断到 POP
-        newGer.resize(POP);
-        for (int i = 0; i < POP; i++) gerPop[i].w = newGer[i];
+        topF<<"]}";
 
-        // 英军简化版 (无策略追踪，用KL排名)
-        vector<int> britIdx(POP); iota(britIdx.begin(), britIdx.end(), 0);
-        sort(britIdx.begin(), britIdx.end(), [&](int a, int b) {
-            float fa = britTotal[a]>0?(float)britWins[a]/britTotal[a]:0;
-            float fb = britTotal[b]>0?(float)britWins[b]/britTotal[b]:0;
-            return fa > fb;
+        // 扩展 stats.json (含 MAP-Elites 网格快照)
+        // 先算 MAP-Elites 网格 (移到 stats 前面)
+        const int G=5;
+        float gerGridFitness[G][G]; Weights gerGridBest[G][G]; bool gerGridSet[G][G]={};
+        float gerGridWR[G][G]={};
+        auto cellIdx=[G](float rp,float fp){return make_pair(min(G-1,max(0,(int)(rp*G))),min(G-1,max(0,(int)(fp*G))));};
+        for (int i=0;i<POP;i++) {
+            float t=gerStrats[i][0]+gerStrats[i][1]+gerStrats[i][2]+gerStrats[i][3]+1;
+            auto [r,f]=cellIdx((float)gerStrats[i][0]/t,(float)gerStrats[i][1]/t);
+            float wr=gerTotal[i]>0?(float)gerWins[i]/gerTotal[i]:0;
+            auto kl=[&](int a,int b){
+                float k=0;const float *pa=&gerPop[a].w.w1,*pb=&gerPop[b].w.w1;
+                for(int x=0;x<(int)(sizeof(Weights)/sizeof(float));x++)
+                    if(pa[x]>0.001f&&pb[x]>0.001f)k+=abs(pa[x]*log(pa[x]/pb[x]));
+                return k;
+            };
+            float klSum=0;for(int j=0;j<POP;j++)if(i!=j)klSum+=kl(i,j);
+            float fit=wr-0.1f*klSum/(POP-1);
+            if(!gerGridSet[r][f]||fit>gerGridFitness[r][f]){
+                gerGridFitness[r][f]=fit;gerGridBest[r][f]=gerPop[i].w;gerGridSet[r][f]=true;gerGridWR[r][f]=wr;
+            }
+        }
+        // 写 stats.json
+        ofstream statF(genDir+"/stats.json");
+        statF<<"{\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<",\"gen\":"<<(gen+1)
+             <<",\"diversity_kl\":"<<klMean
+             <<",\"strategy_dist\":{\"rush\":"<<rushPct<<",\"farm\":"<<farmPct<<",\"hunt\":"<<huntPct<<",\"hide\":"<<hidePct<<"}"
+             <<",\"best_ger_wr\":"<<bestGerWR<<",\"best_brit_wr\":"<<bestBritWR
+             <<",\"best_ger\":"<<bestGer<<",\"best_brit\":"<<bestBrit
+             <<",\"avg_vp_ger\":"<<(totalGames>0?sumVpGer/totalGames:0)
+             <<",\"avg_vp_brit\":"<<(totalGames>0?sumVpBrit/totalGames:0)
+             <<",\"avg_turns\":"<<(totalGames>0?sumTurns/totalGames:0)
+             <<",\"close_pct\":"<<(totalGames>0?(float)totalClose/totalGames:0)
+             <<",\"grid_cells\":[";
+        bool firstCell=true;
+        for(int r=0;r<G;r++)for(int c=0;c<G;c++){
+            if(!firstCell)statF<<",";firstCell=false;
+            statF<<"{\"r\":"<<r<<",\"c\":"<<c<<",\"occ\":"<<(gerGridSet[r][c]?"true":"false");
+            if(gerGridSet[r][c])statF<<",\"wr\":"<<gerGridWR[r][c]<<",\"fit\":"<<gerGridFitness[r][c];
+            statF<<"}";
+        }
+        statF<<"]"
+             <<",\"elapsed_s\":"<<elapsed<<"}";
+
+        ofstream ck(outDir+"/checkpoint_cpp.json");
+        ck<<"{\"generation\":"<<(gen+1)<<",\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit
+          <<",\"bestGer\":"<<bestGer<<",\"bestBrit\":"<<bestBrit<<"}";
+
+        gerWinHist.push_back(avgGer); britWinHist.push_back(avgBrit); diversityHist.push_back(klMean);
+        ostringstream sh; sh<<"{\"rush\":"<<rushPct<<",\"farm\":"<<farmPct<<",\"hunt\":"<<huntPct<<",\"hide\":"<<hidePct<<"}";
+        strategyHist.push_back(sh.str());
+
+        // 用已算好的 MAP-Elites 网格繁殖
+        vector<Weights> newGer;int filled=0;
+        for(int r=0;r<G;r++)for(int c=0;c<G;c++)if(gerGridSet[r][c]){newGer.push_back(gerGridBest[r][c]);filled++;}
+        float anneal=max(0.1f,1.0f-gen*0.01f);
+        for(int r=0;r<G;r++)for(int c=0;c<G;c++){
+            if(gerGridSet[r][c])continue;
+            Weights* nearest=nullptr;int bestDist=999;
+            for(int nr=0;nr<G;nr++)for(int nc=0;nc<G;nc++){
+                if(!gerGridSet[nr][nc])continue;
+                int d=abs(nr-r)+abs(nc-c);if(d<bestDist){bestDist=d;nearest=&gerGridBest[nr][nc];}
+            }
+            if(nearest){Weights mutant=*nearest;mutateAll(mutant,3.0f*anneal);newGer.push_back(mutant);}
+        }
+        while((int)newGer.size()<POP){Weights mutant=newGer[rand()%newGer.size()];mutateAll(mutant,3.0f*anneal);newGer.push_back(mutant);}
+        newGer.resize(POP);for(int i=0;i<POP;i++)gerPop[i].w=newGer[i];
+
+        vector<int> britIdx(POP);iota(britIdx.begin(),britIdx.end(),0);
+        sort(britIdx.begin(),britIdx.end(),[&](int a,int b){
+            float fa=britTotal[a]>0?(float)britWins[a]/britTotal[a]:0;
+            float fb=britTotal[b]>0?(float)britWins[b]/britTotal[b]:0;return fa>fb;
         });
         vector<Weights> newBrit(POP);
-        for (int i=0;i<min(3,POP);i++) newBrit[i] = britPop[britIdx[i]].w;
-        for (int i=3;i<POP;i++) { newBrit[i]=newBrit[rand()%3]; mutateAll(newBrit[i], 3.0f*anneal); }
-        for (int i=0;i<POP;i++) britPop[i].w = newBrit[i];
+        for(int i=0;i<min(3,POP);i++)newBrit[i]=britPop[britIdx[i]].w;
+        for(int i=3;i<POP;i++){newBrit[i]=newBrit[rand()%3];mutateAll(newBrit[i],3.0f*anneal);}
+        for(int i=0;i<POP;i++)britPop[i].w=newBrit[i];
     }
-    // 生成 summary.json (兼容可视化脚本)
-    ofstream summ(outDir + "/summary.json");
-    summ << "{\"gerWinHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.5";
-    summ << "],\"britWinHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.5";
-    summ << "],\"diversityHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"0.8";
-    summ << "],\"strategyHistory\":["; for (int i=0;i<GEN;i++) summ<<(i?",":"")<<"{\"rush\":0.1,\"farm\":0.4,\"hunt\":0.15,\"hide\":0.35}";
-    summ << "]}";
-    cout << "\n✅ 完成! " << outDir << "/gen_*/\n";
+
+    ofstream summ(outDir+"/summary.json");
+    summ<<"{\"gerWinHistory\":[";for(size_t i=0;i<gerWinHist.size();i++)summ<<(i?",":"")<<gerWinHist[i];
+    summ<<"],\"britWinHistory\":[";for(size_t i=0;i<britWinHist.size();i++)summ<<(i?",":"")<<britWinHist[i];
+    summ<<"],\"diversityHistory\":[";for(size_t i=0;i<diversityHist.size();i++)summ<<(i?",":"")<<diversityHist[i];
+    summ<<"],\"strategyHistory\":[";for(size_t i=0;i<strategyHist.size();i++)summ<<(i?",":"")<<strategyHist[i];
+    summ<<"]}";
+    cout<<"\n✅ V3完成! "<<outDir<<"/gen_*/\n";
 }

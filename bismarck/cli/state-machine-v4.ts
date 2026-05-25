@@ -16,14 +16,6 @@ export interface Weights {
   w9: number; w10: number; w11: number
   // 德军 HideDeep
   w12: number; w13: number; w14: number; w15: number
-  // 德军热力图强度 (可训练)
-  rushF7Pull: number     // F7引力强度 (默认-10)
-  rushPathPull: number   // 路径引导强度缩放 (默认1.0)
-  farmBasePull: number   // 航路基础引力 (默认2)
-  farmVPScale: number    // VP缩放系数 (默认0.5)
-  huntPull: number       // 孤立目标引力 (默认3)
-  hidePush: number       // 英军排斥力 (默认8)
-  rushVPPenalty: number  // VP不足时rush扣分系数 (默认4.0)
   // 英军 Search
   s1: number; s2: number; s3: number
   // 英军 Hunt
@@ -37,10 +29,8 @@ export interface Weights {
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
-  w1:8, w2:3, w3:2, w4:4, w5:3, w6:2, w7:2, w8:1,
+  w1:8, w2:3, w3:2, w4:4, w5:2, w6:2, w7:2, w8:1,
   w9:4, w10:2, w11:2, w12:1, w13:2, w14:1, w15:2,
-  rushF7Pull: -10, rushPathPull: 1.0, farmBasePull: 2, farmVPScale: 0.5,
-  huntPull: 3, hidePush: 8, rushVPPenalty: 4.0,
   s1:10, s2:0.5, s3:1, h1:10, h2:5, h3:3,
   p1:3, p2:2, p3:2, d1:5, d2:3, d3:4, temperature: 1.0
 }
@@ -253,11 +243,11 @@ class GermanBrain {
     const britNearF7 = this.countBritNear(state, 'F7', 3)
     const isolatedTargets = this.countIsolated(state)
 
-    // VP门槛: 不足时冲港得分接近零
-    const vpNeed = Math.max(0, 6 - state.vp.german)
+    // VP不足时冲港无用(到F7也赢不了), 优先破交
+    const vpNeed = Math.max(0, 6 - state.vp.german) // 还差多少VP才能赢
     const rush = this.w.w1 * Math.max(0, (8 - distToF7) / 8) + this.w.w2 * ((currentShip.steps)/(currentShip.def.maxSteps))
                + this.w.w3 * (1 - britNearF7/5) - this.w.w4 * (state.bismarckFound ? 2 : 0)
-               - vpNeed * this.w.rushVPPenalty // VP差越多扣越多(默认4.0, VP=0扣24分→rush归零)
+               - vpNeed * 1.5 // VP差越多, 冲港越不划算
     const farm = this.w.w5 * (onRoute ? 1 : 0) + this.w.w6 * (1 - state.vp.german/6)
                + this.w.w7 * (state.bismarckFound ? 0 : 1) + this.w.w8 * 0.3
     const hunt = this.w.w9 * isolatedTargets + this.w.w10 * 0.5 - this.w.w11 * this.countBritNear(state, hexToLabel(curPos)!, 3)
@@ -282,48 +272,29 @@ class GermanBrain {
 
     // 策略修正热力图
     if (picked === 'rush') {
-      // F7终点强力吸引 (可训练强度)
-      hm.set(6, 5, hm.get(6, 5) + this.w.rushF7Pull)
+      // F7终点强力吸引
+      hm.set(6, 5, hm.get(6, 5) - 10)
       for (const nb of hexNeighbors({ q: 5, r: 6 })) {
-        const nl = hexToLabel(nb); if (nl) { const rc = rcOf(nl); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) + this.w.rushF7Pull * 0.5) }
+        const nl = hexToLabel(nb); if (nl) { const rc = rcOf(nl); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) - 5) }
       }
-      // 冲港路径引导点 (按距离递增, 强度可缩放)
+      // 冲港路径引导点 (按距离递增强度)
       for (const [l, v] of [['D8',-4],['E7',-5],['F6',-7],['D6',-3],['C6',-2],['C7',-2]] as [string,number][]) {
-        const rc = rcOf(l); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) + v * this.w.rushPathPull)
+        const rc = rcOf(l); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) + v)
       }
     } else if (picked === 'farm') {
-      const farmPull = -(this.w.farmBasePull + (6 - state.vp.german) * this.w.farmVPScale) // 可训练
+      const farmPull = -(2 + (6 - state.vp.german) * 0.5) // VP越少拉力越强, VP=0→-5, VP=6→-2
       for (const l of ['D2','D3','C3','C4','D5','E1','E4','E5']) {
         const rc = rcOf(l); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) + farmPull)
       }
-    } else if (picked === 'hunt') {
-      // 主动猎杀: 孤立英军目标周围强力吸引
-      for (const sh of state.britishShips) {
-        if (sh.steps <= 0) continue
-        const pos = state.britishPositions.get(sh.def.id); if (!pos) continue
-        let nearby = 0
-        for (const sh2 of state.britishShips) {
-          if (sh2.steps <= 0 || sh2.def.id === sh.def.id) continue
-          const p2 = state.britishPositions.get(sh2.def.id); if (!p2) continue
-          if (hexDistance(pos, p2) <= 3) nearby++
-        }
-        if (nearby === 0) { // 孤立目标 → 吸引
-          for (let r = 0; r < H; r++)
-            for (let c = 0; c < W; c++) {
-              const dist = hexDistance(pos, { q: c, r })
-              hm.add(r, c, -this.w.huntPull / (1 + dist))
-            }
-        }
-      }
     } else if (picked === 'hide') {
-      // 英军周围排斥力 (可训练强度)
+      // 英军周围 +8 斥力
       for (const sh of state.britishShips) {
         if (sh.steps <= 0) continue
         const pos = state.britishPositions.get(sh.def.id); if (!pos) continue
         for (let dr = -3; dr <= 3; dr++) {
           for (let dc = -3; dc <= 3; dc++) {
             const q = pos.q + dc, r = pos.r + dr
-            if (q >= 0 && q < W && r >= 0 && r < H) hm.add(r, q, this.w.hidePush)
+            if (q >= 0 && q < W && r >= 0 && r < H) hm.add(r, q, 8)
           }
         }
       }

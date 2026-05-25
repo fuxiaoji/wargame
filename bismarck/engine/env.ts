@@ -277,13 +277,15 @@ export class BismarckEnv {
     }
 
     if (s.phase === 'british-search') {
-      // 航空索敌优先执行（在同格索敌之前）
-      const arkRoyal = s.britishShips.find(sh => sh.def.id === 'ark-royal' && sh.steps > 0)
-      if (arkRoyal) {
-        const pos = s.britishPositions.get('ark-royal')
-        if (pos) {
-          for (const label of getAirSearchTargets(s, pos)) {
-            actions.push({ id: nextId++, type: 'air-search', label: `航空索敌: ${label}`, params: { targetLabel: label } })
+      // 航空索敌优先执行（在同格索敌之前），每回合限一次
+      if (!s.airSearchDone) {
+        const arkRoyal = s.britishShips.find(sh => sh.def.id === 'ark-royal' && sh.steps > 0)
+        if (arkRoyal) {
+          const pos = s.britishPositions.get('ark-royal')
+          if (pos) {
+            for (const label of getAirSearchTargets(s, pos)) {
+              actions.push({ id: nextId++, type: 'air-search', label: `航空索敌: ${label}`, params: { targetLabel: label } })
+            }
           }
         }
       }
@@ -345,6 +347,7 @@ export class BismarckEnv {
       }
       case 'air-search': {
         if (params?.targetLabel) this.game.doAirSearch(params.targetLabel)
+        this.game.state.airSearchDone = true
         break
       }
       case 'combat': {
