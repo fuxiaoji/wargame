@@ -1,4 +1,4 @@
-/** C++ V3 锦标赛引擎 — 多线程 + 分级张量记录 */
+/** C++ V3 锦标赛引擎 — 多线程 + 分级张量记录 + 进度条 */
 #include "state_machine.hpp"
 #include "env.hpp"
 #include "tensor_logger.hpp"
@@ -11,8 +11,28 @@
 #include <thread>
 #include <atomic>
 #include <deque>
+#include <algorithm>
+#include <chrono>
 #include <sys/stat.h>
 using namespace std;
+using namespace chrono;
+
+// ===== 进度条工具 =====
+string bar(int pct, int w = 20) {
+    int filled = pct * w / 100;
+    string b = "[";
+    for (int i = 0; i < w; i++)
+        b += i < filled ? (i == filled - 1 && pct < 100 ? '>' : '=') : (i == filled ? '>' : ' ');
+    b += "]";
+    return b;
+}
+string fmtETA(seconds eta) {
+    if (eta.count() < 0) return "--:--";
+    int h = eta.count() / 3600, m = (eta.count() % 3600) / 60, s = eta.count() % 60;
+    if (h > 0) return to_string(h) + "h" + to_string(m) + "m";
+    if (m > 0) return to_string(m) + "m" + to_string(s) + "s";
+    return to_string(s) + "s";
+}
 
 struct WeightSet { Weights w; };
 
@@ -115,7 +135,6 @@ static GameResult runOneGame(const Weights& gerW, const Weights& britW,
                 usedHexes.insert(hex);
                 for (const auto& id : shipIds) env.game.placeBritishToken(id, hex);
             }
-            // 使用引擎自带 reachable 计算，替代手写 BFS
             unordered_set<string> reachable;
             ShipState dummyShip;
             dummyShip.def.speed = 2; dummyShip.steps = 2;
@@ -193,18 +212,18 @@ static GameResult runOneGame(const Weights& gerW, const Weights& britW,
 void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
                  const vector<WeightSet>& gerP, const vector<WeightSet>& britP,
                  int GPP, int gen, const string& tensorDir,
-                 vector<PairResults>& results, atomic<int>& done, int total) {
+                 vector<PairResults>& results, atomic<int>& done,
+                 int total, steady_clock::time_point t0) {
     for (int idx = start; idx < end; idx++) {
         auto [gi, bi] = pairs[idx];
         PairResults pr; pr.gi = gi; pr.bi = bi;
         int gerW = 0, britW = 0;
         for (int g = 0; g < GPP; g++) {
             bool swap = g >= GPP / 2;
-            // gen0 抽样2000局 (10%): 每对的前1局 + 额外随机
-            bool record = (gen==0) && (rand()%100 < 10);  // ~2000局 gen0 张量
+            bool record = (gen==0) && (rand()%100 < 10);
             string tid, gid;
             if (record) {
-                tid = tensorDir + "/gen_000"; mkdir(tid.c_str(), 0755);
+                tid = tensorDir + "/gen_000"; make_dir(tid.c_str());
                 gid = "g" + to_string(gi) + "_b" + to_string(bi) + "_" + to_string(g);
             }
             int seed = (gen+1)*100000 + gi*1000 + bi*50 + g + (swap?500000:0);
@@ -218,8 +237,13 @@ void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
         pr.gerWins = gerW; pr.britWins = britW;
         results.push_back(pr);
         int d = ++done;
-        if (d % max(1, total/20) == 0)
-            cout << "\r  " << (d*100/total) << "% " << d << "/" << total << flush;
+        if (d % max(1, total/40) == 0 || d == total) {
+            int pct = d * 100 / total;
+            auto elapsed = duration_cast<seconds>(steady_clock::now() - t0);
+            seconds eta(d > 0 ? seconds((long)(elapsed.count() * (total - d) / (double)d)) : seconds(0));
+            cout << "\r  " << bar(pct) << " " << pct << "% | "
+                 << d << "/" << total << " | ETA " << fmtETA(eta) << flush;
+        }
     }
 }
 
@@ -227,9 +251,9 @@ void runJobRange(int start, int end, const vector<pair<int,int>>& pairs,
 void mutateAll(Weights& w, float scale) {
     float* ptr = &w.w1; int count = sizeof(Weights) / sizeof(float);
     for (int i = 0; i < count; i++) {
-        if ((float)rand()/RAND_MAX < 0.5f) {  // 50% 变异率
+        if ((float)rand()/RAND_MAX < 0.5f) {
             float& val = *(ptr + i);
-            val = max(0.2f, val + ((float)rand()/RAND_MAX - 0.5f) * scale);  // 下限 0.2
+            val = max(0.2f, val + ((float)rand()/RAND_MAX - 0.5f) * scale);
         }
     }
 }
@@ -242,14 +266,26 @@ int main(int argc, char** argv) {
     int THREADS = argc > 4 ? stoi(argv[4]) : thread::hardware_concurrency();
     string outDir = argc > 5 ? argv[5] : "/Users/Zhuanz1/Desktop/code/wargame/deeplearn/data/training_v3";
 
-    mkdir(outDir.c_str(), 0755);
-    cout << "V3 锦标赛: " << GEN << "代 × " << POP << "×" << POP << " × " << GPP << "局 | " << THREADS << "线程\n";
+    make_dir(outDir.c_str());
+    cout << "V3 锦标赛: " << GEN << "代 x " << POP << "x" << POP << " x " << GPP << "局 | " << THREADS << "线程\n";
     long totalPerGen = (long)POP * POP * GPP;
     cout << "总局数/代: " << totalPerGen/1000 << "K | 总计: " << (totalPerGen*GEN)/10000 << "万局\n\n";
+
+    auto runStart = steady_clock::now();
 
     ofstream cfg(outDir + "/run_config.json");
     cfg << "{\"gen\":"<<GEN<<",\"pop\":"<<POP<<",\"gpp\":"<<GPP
         <<",\"threads\":"<<THREADS<<",\"timestamp\":"<<time(nullptr)<<"}";
+
+    // 初始 live.json (训练启动即写入，可视化可提前连接)
+    {
+        ofstream live(outDir + "/live.json");
+        live << "{\"gen\":0,\"max_gen\":"<<GEN
+             <<",\"avg_ger\":0,\"avg_brit\":0,\"best_ger_wr\":0,\"best_brit_wr\":0"
+             <<",\"diversity_kl\":0,\"rush\":0,\"farm\":0,\"hunt\":0,\"hide\":0"
+             <<",\"elapsed_s\":0,\"total_elapsed_s\":0"
+             <<",\"ger_history\":[],\"brit_history\":[],\"diversity_history\":[],\"strategy_history\":[]}";
+    }
 
     vector<WeightSet> gerPop(POP), britPop(POP);
     vector<int> gerWins(POP), gerTotal(POP), britWins(POP), britTotal(POP);
@@ -263,14 +299,14 @@ int main(int argc, char** argv) {
     }
 
     for (int gen = 0; gen < GEN; gen++) {
-        time_t startTime = time(nullptr);
+        auto genStart = steady_clock::now();
         fill(gerWins.begin(), gerWins.end(), 0); fill(gerTotal.begin(), gerTotal.end(), 0);
         fill(britWins.begin(), britWins.end(), 0); fill(britTotal.begin(), britTotal.end(), 0);
         for (auto& s : gerStrats) fill(s.begin(), s.end(), 0);
 
         string genDir = outDir + "/gen_" + padGen(gen);
-        mkdir(genDir.c_str(), 0755);
-        string resDir = genDir + "/results"; mkdir(resDir.c_str(), 0755);
+        make_dir(genDir.c_str());
+        string resDir = genDir + "/results"; make_dir(resDir.c_str());
 
         vector<pair<int,int>> pairs;
         for (int gi = 0; gi < POP; gi++)
@@ -282,14 +318,16 @@ int main(int argc, char** argv) {
         atomic<int> completedPairs{0};
         int totalPairs = pairs.size();
         int chunk = (totalPairs + THREADS - 1) / THREADS;
+
+        cout << "  代" << (gen+1) << "/" << GEN << " 对战进行中...\n";
         for (int t = 0; t < THREADS; t++) {
             int s = t * chunk, e = min(s + chunk, totalPairs);
             if (s < e) threads.emplace_back([&, t, s, e]() {
-                runJobRange(s, e, pairs, gerPop, britPop, GPP, gen, outDir, threadResults[t], completedPairs, totalPairs);
+                runJobRange(s, e, pairs, gerPop, britPop, GPP, gen, outDir, threadResults[t], completedPairs, totalPairs, genStart);
             });
         }
         for (auto& th : threads) th.join();
-        cout << "\r  " << flush;
+        cout << endl;
 
         // 汇总 + Tier 0 写 per-pair results
         int totalClose=0, totalGames=0;
@@ -321,7 +359,8 @@ int main(int argc, char** argv) {
         for (int i=0;i<POP;i++) avgGer+=gerTotal[i]>0?(float)gerWins[i]/gerTotal[i]:0;
         for (int i=0;i<POP;i++) avgBrit+=britTotal[i]>0?(float)britWins[i]/britTotal[i]:0;
         avgGer/=POP; avgBrit/=POP;
-        int elapsed=time(nullptr)-startTime;
+        auto genElapsed = duration_cast<seconds>(steady_clock::now() - genStart).count();
+        auto totalElapsed = duration_cast<seconds>(steady_clock::now() - runStart);
 
         int bestGer=0, bestBrit=0;
         float bestGerWR=0, bestBritWR=0;
@@ -337,8 +376,13 @@ int main(int argc, char** argv) {
         float ttl=totalR+totalF+totalH+totalD+1;
         float rushPct=(float)totalR/ttl,farmPct=(float)totalF/ttl,huntPct=(float)totalH/ttl,hidePct=(float)totalD/ttl;
 
-        cout << "\r  代"<<(gen+1)<<"/"<<GEN<<" 德:"<<(int)(avgGer*100)<<"% 英:"<<(int)(avgBrit*100)
-             <<"% 焦灼:"<<(totalGames>0?totalClose*100/totalGames:0)<<"% "<<elapsed<<"s\n";
+        // 代级 ETA
+        seconds genETA = gen > 0 ? seconds((long)(totalElapsed.count() * (GEN - gen - 1) / (double)(gen + 1))) : seconds(0);
+        cout << "  代" << (gen+1) << "/" << GEN
+             << " | 德:" << (int)(avgGer*100) << "% 英:" << (int)(avgBrit*100)
+             << "% | 焦灼:" << (totalGames>0?totalClose*100/totalGames:0) << "%"
+             << " | 耗时 " << genElapsed << "s"
+             << " | 总ETA " << fmtETA(genETA) << "\n";
 
         // KL diversity
         float klMean=0; int klPairs=0;
@@ -351,14 +395,14 @@ int main(int argc, char** argv) {
         klMean=klPairs>0?klMean/klPairs:0;
 
         // Tier 1: 精英对战 (top德 vs top英, 全部50局张量)
-        string eliteDir=genDir+"/elite"; mkdir(eliteDir.c_str(),0755);
+        string eliteDir=genDir+"/elite"; make_dir(eliteDir.c_str());
         for (int g=0;g<GPP;g++) {
             int seed=(gen+1)*900000+g;
             runOneGame(gerPop[bestGer].w,britPop[bestBrit].w,bestGer,bestBrit,seed,true,eliteDir,"elite_"+to_string(g));
         }
 
         // Tier 3: 焦灼局重播 (80局/代)
-        string closeDir=genDir+"/close"; mkdir(closeDir.c_str(),0755);
+        string closeDir=genDir+"/close"; make_dir(closeDir.c_str());
         int closeSaved=0;
         for (auto& tr : threadResults) for (auto& pr : tr) for (auto& gr : pr.games) {
             if (closeSaved>=80||!gr.isClose) continue;
@@ -368,7 +412,7 @@ int main(int argc, char** argv) {
         }
 
         // Tier 5: 随机抽样 (80局/代, 德胜英胜各半)
-        string randDir=genDir+"/random"; mkdir(randDir.c_str(),0755);
+        string randDir=genDir+"/random"; make_dir(randDir.c_str());
         int randGer=0,randBrit=0;
         for (int k=0;k<400&&(randGer<40||randBrit<40);k++) {
             int gi=rand()%POP,bi=rand()%POP;
@@ -386,7 +430,7 @@ int main(int argc, char** argv) {
         ofstream britF(genDir+"/brit_population.json");
         britF<<"["; for(int i=0;i<POP;i++){if(i)britF<<",";britF<<weightsToJson(britPop[i].w);} britF<<"]";
 
-        // 每代个体统计 (KL vs WR 散点图用)
+        // 每代个体统计
         ofstream indF(genDir+"/individual_stats.json");
         indF<<"[";
         for (int i=0;i<POP;i++) {
@@ -406,7 +450,7 @@ int main(int argc, char** argv) {
         }
         indF<<"]";
 
-        // 每代 Top-3 权重 (权重轨迹图用)
+        // Top-3 权重
         vector<int> gerRank(POP), britRank(POP);
         iota(gerRank.begin(),gerRank.end(),0); iota(britRank.begin(),britRank.end(),0);
         sort(gerRank.begin(),gerRank.end(),[&](int a,int b){
@@ -430,8 +474,7 @@ int main(int argc, char** argv) {
         }
         topF<<"]}";
 
-        // 扩展 stats.json (含 MAP-Elites 网格快照)
-        // 先算 MAP-Elites 网格 (移到 stats 前面)
+        // MAP-Elites 网格
         const int G=5;
         float gerGridFitness[G][G]; Weights gerGridBest[G][G]; bool gerGridSet[G][G]={};
         float gerGridWR[G][G]={};
@@ -452,7 +495,7 @@ int main(int argc, char** argv) {
                 gerGridFitness[r][f]=fit;gerGridBest[r][f]=gerPop[i].w;gerGridSet[r][f]=true;gerGridWR[r][f]=wr;
             }
         }
-        // 写 stats.json
+        // stats.json
         ofstream statF(genDir+"/stats.json");
         statF<<"{\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit<<",\"gen\":"<<(gen+1)
              <<",\"diversity_kl\":"<<klMean
@@ -463,6 +506,8 @@ int main(int argc, char** argv) {
              <<",\"avg_vp_brit\":"<<(totalGames>0?sumVpBrit/totalGames:0)
              <<",\"avg_turns\":"<<(totalGames>0?sumTurns/totalGames:0)
              <<",\"close_pct\":"<<(totalGames>0?(float)totalClose/totalGames:0)
+             <<",\"elapsed_s\":"<<genElapsed
+             <<",\"total_elapsed_s\":"<<totalElapsed.count()
              <<",\"grid_cells\":[";
         bool firstCell=true;
         for(int r=0;r<G;r++)for(int c=0;c<G;c++){
@@ -471,18 +516,44 @@ int main(int argc, char** argv) {
             if(gerGridSet[r][c])statF<<",\"wr\":"<<gerGridWR[r][c]<<",\"fit\":"<<gerGridFitness[r][c];
             statF<<"}";
         }
-        statF<<"]"
-             <<",\"elapsed_s\":"<<elapsed<<"}";
+        statF<<"]}";
 
         ofstream ck(outDir+"/checkpoint_cpp.json");
         ck<<"{\"generation\":"<<(gen+1)<<",\"avgGer\":"<<avgGer<<",\"avgBrit\":"<<avgBrit
-          <<",\"bestGer\":"<<bestGer<<",\"bestBrit\":"<<bestBrit<<"}";
+          <<",\"bestGer\":"<<bestGer<<",\"bestBrit\":"<<bestBrit
+          <<",\"total_elapsed_s\":"<<totalElapsed.count()<<"}";
 
         gerWinHist.push_back(avgGer); britWinHist.push_back(avgBrit); diversityHist.push_back(klMean);
         ostringstream sh; sh<<"{\"rush\":"<<rushPct<<",\"farm\":"<<farmPct<<",\"hunt\":"<<huntPct<<",\"hide\":"<<hidePct<<"}";
         strategyHist.push_back(sh.str());
 
-        // 用已算好的 MAP-Elites 网格繁殖
+        // 实时可视化 JSON (供 Python 脚本读取)
+        {
+            ofstream live(outDir + "/live.json");
+            live << "{\"gen\":" << (gen+1) << ",\"max_gen\":" << GEN
+                 << ",\"avg_ger\":" << avgGer << ",\"avg_brit\":" << avgBrit
+                 << ",\"best_ger_wr\":" << bestGerWR << ",\"best_brit_wr\":" << bestBritWR
+                 << ",\"diversity_kl\":" << klMean
+                 << ",\"rush\":" << rushPct << ",\"farm\":" << farmPct
+                 << ",\"hunt\":" << huntPct << ",\"hide\":" << hidePct
+                 << ",\"elapsed_s\":" << genElapsed
+                 << ",\"total_elapsed_s\":" << totalElapsed.count()
+                 << ",\"ger_history\":[";
+            for (size_t i = 0; i < gerWinHist.size(); i++)
+                live << (i ? "," : "") << gerWinHist[i];
+            live << "],\"brit_history\":[";
+            for (size_t i = 0; i < britWinHist.size(); i++)
+                live << (i ? "," : "") << britWinHist[i];
+            live << "],\"diversity_history\":[";
+            for (size_t i = 0; i < diversityHist.size(); i++)
+                live << (i ? "," : "") << diversityHist[i];
+            live << "],\"strategy_history\":[";
+            for (size_t i = 0; i < strategyHist.size(); i++)
+                live << (i ? "," : "") << strategyHist[i];
+            live << "]}";
+        }
+
+        // MAP-Elites 繁殖
         vector<Weights> newGer;int filled=0;
         for(int r=0;r<G;r++)for(int c=0;c<G;c++)if(gerGridSet[r][c]){newGer.push_back(gerGridBest[r][c]);filled++;}
         float anneal=max(0.1f,1.0f-gen*0.01f);
@@ -509,11 +580,13 @@ int main(int argc, char** argv) {
         for(int i=0;i<POP;i++)britPop[i].w=newBrit[i];
     }
 
+    auto totalElapsed = duration_cast<seconds>(steady_clock::now() - runStart).count();
     ofstream summ(outDir+"/summary.json");
-    summ<<"{\"gerWinHistory\":[";for(size_t i=0;i<gerWinHist.size();i++)summ<<(i?",":"")<<gerWinHist[i];
+    summ<<"{\"total_elapsed_s\":"<<totalElapsed
+        <<",\"gerWinHistory\":[";for(size_t i=0;i<gerWinHist.size();i++)summ<<(i?",":"")<<gerWinHist[i];
     summ<<"],\"britWinHistory\":[";for(size_t i=0;i<britWinHist.size();i++)summ<<(i?",":"")<<britWinHist[i];
     summ<<"],\"diversityHistory\":[";for(size_t i=0;i<diversityHist.size();i++)summ<<(i?",":"")<<diversityHist[i];
     summ<<"],\"strategyHistory\":[";for(size_t i=0;i<strategyHist.size();i++)summ<<(i?",":"")<<strategyHist[i];
     summ<<"]}";
-    cout<<"\n✅ V3完成! "<<outDir<<"/gen_*/\n";
+    cout << "\nV3完成! " << outDir << "/gen_*/ | 总耗时 " << fmtETA(seconds(totalElapsed)) << "\n";
 }

@@ -6,6 +6,12 @@
 #include <fstream>
 #include <cstring>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+inline int make_dir(const char* path) { return _mkdir(path); }
+#else
+inline int make_dir(const char* path) { return mkdir(path, 0755); }
+#endif
 #include <deque>
 
 // ========== 常量 ==========
@@ -300,7 +306,7 @@ inline void writeGameLog(const std::string& dir, const std::string& gameId,
     const GameLogResult& result) {
 
     std::string fullDir = dir + "/" + gameId;
-    mkdir(fullDir.c_str(), 0755);
+    make_dir(fullDir.c_str());
 
     {
         std::ofstream f(fullDir + "/state.bin", std::ios::binary);
