@@ -143,18 +143,17 @@ public:
         if (state.phase != Phase::german_move)
             return {false, "当前不是德军移动阶段"};
 
-        // 伪装鉴定失败 → 只有鉴定失败的那些伪装跟随俾斯麦 (规则 6.2)
-        if (state.germanPositionPublic) {
+        // 伪装鉴定失败 → 失败伪装持续跟随俾斯麦, 直到鉴定成功 (规则 6.2)
+        if (!state.failedDummies.empty()) {
             auto bismarckIt = state.germanPositions.find("bismarck");
-            if (bismarckIt != state.germanPositions.end() && !state.failedDummies.empty()) {
+            if (bismarckIt != state.germanPositions.end()) {
                 for (auto& bShip : state.britishShips) {
                     if (state.failedDummies.count(bShip.def.id) && bShip.steps > 0)
                         state.britishPositions[bShip.def.id] = bismarckIt->second;
                 }
             }
-            state.germanPositionPublic = false;
-            state.failedDummies.clear();
         }
+        state.germanPositionPublic = false;
 
         for (auto& ship : state.britishShips) ship.revealed = false;
         state.movedThisTurn.clear();
@@ -206,6 +205,7 @@ public:
         auto result = checkCoLocationSearch(state);
         if (result.type == SearchType::CoLocate) {
             state.bismarckFound = true;
+            if (result.germanLabel) { state.lastSightingHex = *result.germanLabel; state.lastSightingTurn = state.turn; }
 
             // 6.2 伪装算子鉴定: 先处理所有被翻开的伪装算子
             for (const auto* bShip : result.revealedBritish) {
@@ -214,6 +214,7 @@ public:
                     if (removed) {
                         const_cast<ShipState*>(bShip)->steps = 0;
                         state.britishPositions.erase(bShip->def.id);
+                        state.failedDummies.erase(bShip->def.id);  // 停止跟随
                     } else {
                         state.germanPositionPublic = true;
                         state.failedDummies.insert(bShip->def.id);
@@ -238,6 +239,7 @@ public:
         auto result = performAirSearch(state, adjacentLabel);
         if (!result.foundShips.empty()) {
             state.bismarckFound = true;
+            state.lastSightingHex = adjacentLabel; state.lastSightingTurn = state.turn;
             state.combatPending = true;
         }
         return result;
@@ -340,8 +342,11 @@ public:
         // 信号泄露：记录暴露位置 + 激活所有英军战舰
         if (result.positionRevealed) {
             auto posIt = state.germanPositions.find(shipId);
-            if (posIt != state.germanPositions.end())
-                state.transportRevealedHex = hexToLabel(posIt->second);
+            if (posIt != state.germanPositions.end()) {
+                auto label = hexToLabel(posIt->second);
+                state.transportRevealedHex = label;
+                if (label) { state.lastSightingHex = *label; state.lastSightingTurn = state.turn; }
+            }
             state.bismarckFound = true;  // 英军获知德军位置，所有战舰解锁
         }
 

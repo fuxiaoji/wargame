@@ -25,12 +25,6 @@ export interface Weights {
   hidePush: number       // 英军排斥力 (默认8)
   rushVPPenalty: number  // VP落后时rush扣分系数 (默认4.0)
   rushVPReward: number   // VP领先时rush加分 (默认3.0)
-  // 英军热力系数 (可训练)
-  britDiffuseStr: number  // 扩散强度 (默认0.25)
-  britPatrolPull: number  // patrol航路引力 (默认3.0)
-  britDefendPull: number  // defend F7引力 (默认6.0)
-  britHuntCenter: number  // hunt中心引力 (默认6.0)
-  britSearchRepel: number // search船间排斥 (默认2.0)
   // 英军 Search
   s1: number; s2: number; s3: number
   // 英军 Hunt
@@ -44,11 +38,10 @@ export interface Weights {
 }
 
 export const DEFAULT_WEIGHTS: Weights = {
-  w1:8, w2:3, w3:2, w4:4, w5:3, w6:4, w7:2, w8:2,
+  w1:8, w2:3, w3:2, w4:4, w5:3, w6:2, w7:2, w8:1,
   w9:4, w10:2, w11:2, w12:1, w13:2, w14:1, w15:2,
   rushF7Pull: -10, rushPathPull: 1.0, farmBasePull: 2, farmVPScale: 0.5,
   huntPull: 3, hidePush: 8, rushVPPenalty: 4.0, rushVPReward: 3.0,
-  britDiffuseStr: 0.25, britPatrolPull: 3.0, britDefendPull: 6.0, britHuntCenter: 6.0, britSearchRepel: 2.0,
   s1:10, s2:0.5, s3:1, h1:10, h2:5, h3:3,
   p1:3, p2:2, p3:2, d1:5, d2:3, d3:4, temperature: 1.0
 }
@@ -189,8 +182,7 @@ class Heatmap {
 
 // ========== 调试数据结构 ==========
 export interface AIDebugInfo {
-  heatmap: Float32Array           // 策略修正后的完整热力图
-  germanPossibleHeatmap?: Float32Array  // 仅共享基图(德军可能位置, 无策略叠加)
+  heatmap: Float32Array
   strategyScores: { name: string; raw: number; prob: number }[]
   moveScores: { label: string; heat: number; score: number }[]
   pickedStrategy: string
@@ -271,10 +263,7 @@ class GermanBrain {
     const farm = this.w.w5 * (onRoute ? 1 : 0) + this.w.w6 * (1 - state.vp.german/6)
                + this.w.w7 * (state.bismarckFound ? 0 : 1) + this.w.w8 * 0.3
     const hunt = this.w.w9 * isolatedTargets + this.w.w10 * 0.5 - this.w.w11 * this.countBritNear(state, hexToLabel(curPos)!, 3)
-    // 被发现且VP落后→躲! VP领先或HP不足也躲
-    const mustHide = (state.bismarckFound && !vpLead) || (currentShip.steps < 2)
-    const hide = this.w.w12 * (mustHide ? 2 : (state.bismarckFound ? 1 : 0))
-               + this.w.w13 * (currentShip.steps < 2 ? 1 : 0)
+    const hide = this.w.w12 * (state.bismarckFound ? 1 : 0) + this.w.w13 * (currentShip.steps < 2 ? 1 : 0)
                + this.w.w14 * this.avgBritProximity(state, curPos) - this.w.w15 * (1 - state.vp.german/6)
 
     // 船特定修正：俾斯麦倾向冲港/躲，欧根倾向打工/冒险
@@ -306,7 +295,7 @@ class GermanBrain {
       }
     } else if (picked === 'farm') {
       const farmPull = -(this.w.farmBasePull + (6 - state.vp.german) * this.w.farmVPScale) // 可训练
-      for (const l of ['D2','D3','C3','C4','D5','E1','F4','E4','E5']) {
+      for (const l of ['D2','D3','C3','C4','D5','E1','E4','E5']) {
         const rc = rcOf(l); if (rc) hm.set(rc[0], rc[1], hm.get(rc[0], rc[1]) + farmPull)
       }
     } else if (picked === 'hunt') {
@@ -435,9 +424,7 @@ class GermanBrain {
 class BritishBrain {
   private w: Weights
   private lastKnownGermanPos: HexCoord | null = null
-  private lastSeenTurn = 0  // 最后目击的回合号, 用于回合级计数
-  private prevLastSightingTurn = 0  // 上次看到的 lastSightingTurn, 检测新目击
-  private prevVpGerman = 0  // 上回合德军VP, 用于检测未发现时的VP增长
+  private turnsSinceSeen = 0
   usePropagation: PropMode
 
   constructor(weights: Weights = DEFAULT_WEIGHTS, usePropagation: PropMode = 'off') { this.w = weights; this.usePropagation = usePropagation }
@@ -502,37 +489,13 @@ class BritishBrain {
     const bismarck = state.germanShips.find(s => s.def.id === 'bismarck' && s.steps > 0)
     if (bismarck) {
       const bp = state.germanPositions.get('bismarck')
-      if (bp && state.germanPositionPublic) {
-        // 伪装鉴定失败 → 精准实时位置
+      if (bp && (state.germanPositionPublic || state.bismarckFound)) {
         this.lastKnownGermanPos = bp
-        this.lastSeenTurn = state.turn
+        this.turnsSinceSeen = 0
+      } else {
+        this.turnsSinceSeen++
       }
     }
-    // 失败伪装持续跟随俾斯麦 → 伪装位置 = 德军精确位置
-    if (state.failedDummies.size > 0) {
-      for (const dummyId of state.failedDummies) {
-        const pos = state.britishPositions.get(dummyId)
-        if (pos) {
-          this.lastKnownGermanPos = pos
-          this.lastSeenTurn = state.turn
-          break
-        }
-      }
-    }
-    // lastSightingTurn 变化 → 新目击发生 (即使同格反复目击也能检测)
-    if (state.lastSightingTurn > 0 && state.lastSightingTurn !== this.prevLastSightingTurn) {
-      this.prevLastSightingTurn = state.lastSightingTurn
-      if (state.lastSightingHex) {
-        const rc = rcOf(state.lastSightingHex)
-        if (rc) {
-          this.lastKnownGermanPos = {q: rc[1], r: rc[0]}
-          this.lastSeenTurn = state.lastSightingTurn  // 目击发生的回合
-        }
-      }
-    }
-    const turnsSinceSeen = (state.germanPositionPublic || state.failedDummies.size > 0) ? 0 : Math.max(1, state.turn - this.lastSeenTurn)
-    // 俾斯麦当前航速 (受伤时速1, 满血时速2)
-    const germanSpeed = bismarck ? (bismarck.steps >= bismarck.def.maxSteps ? bismarck.def.speed : Math.max(1, bismarck.def.speed - 1)) : 2
 
     // 策略得分
     const vp_g = state.vp.german
@@ -542,7 +505,7 @@ class BritishBrain {
     const proactiveDefend = (state.turn >= 8 ? 1 : 0) + (vp_g >= 3 ? 1 : 0) + (vp_g >= 5 ? 2 : 0)
     // 德军可能移动范围: 从最后目击位置速2扩散(回合数)
     const inGermanRange = this.lastKnownGermanPos
-      ? hexDistance(curPos, this.lastKnownGermanPos) <= turnsSinceSeen * 2 + 2
+      ? hexDistance(curPos, this.lastKnownGermanPos) <= this.turnsSinceSeen * 2 + 2
       : false
     const onSeaRoute = isSeaRoute(curPos)
 
@@ -551,63 +514,26 @@ class BritishBrain {
     for (const sh of state.britishShips) { if (sh.steps > 0) { const p = state.britishPositions.get(sh.def.id); if (p && hexDistance(p, this.lastKnownGermanPos || curPos) <= 4) huntCount++ } }
     const huntCrowdPenalty = Math.max(0, huntCount - 5) * 1.5 // 超过5艘在目标附近→扣分
 
-    const search  = this.w.s1 * (!state.bismarckFound ? 1 : 0) - this.w.s2 * turnsSinceSeen - this.w.s3 * vp_g
+    const search  = this.w.s1 * (!state.bismarckFound ? 1 : 0) - this.w.s2 * this.turnsSinceSeen - this.w.s3 * vp_g
     const hunt    = this.w.h1 * (state.bismarckFound ? 1 : 0) + this.w.h2 * (1/(distToLast+1)) + this.w.h3 * 1 - huntCrowdPenalty
     const patrol  = this.w.p1 * (onSeaRoute ? 1 : 0) + this.w.p2 * (inGermanRange ? 1 : 0) + this.w.p3 * (1 - (state.bismarckFound ? 0.5 : 0))
     const defend  = this.w.d1 * (germanNearF7 ? 1 : 0) + this.w.d2 * (vp_g >= 5 ? 1 : 0) + this.w.d3 * (1 - shipsNearF7/5) + proactiveDefend
 
-    // === V9 改进 ===
-
-    // I1: 扩散置信度自适应 — 高置信搜捕, 低置信守航线 (不极端, 德军也可刷航线VP)
-    const gCenter2 = this.lastKnownGermanPos || (state.lastSightingHex ? (() => { const rc = rcOf(state.lastSightingHex); return rc ? {q:rc[1], r:rc[0]} as HexCoord : null })() : null)
-    const confRadius = gCenter2 ? turnsSinceSeen * germanSpeed : state.turn * germanSpeed
-    const confidence = Math.max(0, 1 - Math.min(confRadius, 8) / 8)  // 1=刚目击, 0=全图
-    const huntConfBonus = confidence * 3
-    const patrolConfBonus = (1 - confidence) * 2  // 低置信适度加patrol, 不极端
-
-    // I2: 紧急F7防守 — 德军可能1回合到F7且VP领先 → 全力堵门
-    const f7 = {q:5, r:6}
-    const germanCouldReachF7 = this.lastKnownGermanPos && hexDistance(this.lastKnownGermanPos, f7) <= germanSpeed
-    const f7Urgent = germanCouldReachF7 && state.vp.german > state.vp.british
-
-    // I3: VP增长推断 — 未被发现但VP涨了 → 德军在航路刷运输
-    const vpSuspicious = !state.bismarckFound && state.vp.german > this.prevVpGerman
-    this.prevVpGerman = state.vp.german
-
-    const picked = weightedPick(['search','hunt','patrol','defend'],
-      [search, hunt + huntConfBonus, patrol + patrolConfBonus, defend + (f7Urgent ? 10 : 0)], this.w.temperature)
+    const picked = weightedPick(['search','hunt','patrol','defend'], [search, hunt, patrol, defend], this.w.temperature)
 
     // ===== 共享基图: 德军可能位置 (所有策略可见) =====
-    // 优先: 实时位置(germanPositionPublic) > 最后目击位置(lastSighting) > 出生点扩散
-    let gCenter = this.lastKnownGermanPos
-    if (!gCenter && state.lastSightingHex) {
-      const rc = rcOf(state.lastSightingHex)
-      if (rc) gCenter = {q:rc[1], r:rc[0]}
-    }
+    const gCenter = this.lastKnownGermanPos
+    const gTurns = this.lastKnownGermanPos ? this.turnsSinceSeen : state.turn
     const centers = gCenter ? [gCenter]
       : GERMAN_START_HEXES.map(l => { const rc = rcOf(l); return rc ? {q:rc[1], r:rc[0]} as HexCoord : null }).filter(Boolean) as HexCoord[]
-    const gRadius = gCenter ? turnsSinceSeen * germanSpeed : state.turn * germanSpeed
-    const radius = Math.min(gRadius, 8)
-    // 并集扩散: 每个格只要在任一中心的半径内即加引力, 不重复叠加
-    for (let r = 0; r < H; r++)
-      for (let c = 0; c < W; c++) {
-        for (const center of centers) {
-          if (hexDistance(center, { q: c, r }) <= radius) {
-            hm.add(r, c, -this.w.britDiffuseStr)
-            break  // 一个中心命中即止, 避免重叠区累积
-          }
+    for (const center of centers) {
+      const radius = Math.min(gTurns * 2, 8)
+      for (let r = 0; r < H; r++)
+        for (let c = 0; c < W; c++) {
+          const dist = hexDistance(center, { q: c, r })
+          if (dist <= radius) hm.add(r, c, -Math.max(0.2, (radius - dist) * 0.25))
         }
-      }
-
-    // I3: VP增长推断 — 德军在航路刷运输
-    if (vpSuspicious) {
-      for (const l of ['D2','D3','C3','C4','D5','E1','F4','E4','E5']) {
-        const rc = rcOf(l); if (rc) hm.add(rc[0], rc[1], -3)
-      }
     }
-
-    // 快照: 策略修正前的共享基图 (英军视角 = 德军可能位置)
-    const baseHeatmap = new Float32Array(hm.getData())
 
     // ===== 策略热力图叠加 =====
     if (picked === 'search') {
@@ -615,7 +541,7 @@ class BritishBrain {
       for (const sh of state.britishShips) {
         if (sh.steps <= 0 || sh.def.id === currentShip.def.id) continue
         const p = state.britishPositions.get(sh.def.id); if (!p) continue
-        hm.add(p.r, p.q, this.w.britSearchRepel)
+        hm.add(p.r, p.q, 2)
       }
     } else if (picked === 'hunt') {
       // 抱团: 与附近其他 hunting 船互相轻微吸引
@@ -627,15 +553,17 @@ class BritishBrain {
       }
       // 沿扩散梯度分布: 中心强力吸引, 扩散圈梯度, 外围散开
       if (this.lastKnownGermanPos) {
-        const huntRadius = Math.min(turnsSinceSeen * germanSpeed + 2, 6)
+        const huntRadius = Math.min(this.turnsSinceSeen * 2 + 2, 6) // 扩散圈半径随时间增长
         for (let r = 0; r < H; r++)
           for (let c = 0; c < W; c++) {
-            if (hexDistance(this.lastKnownGermanPos!, { q: c, r }) <= huntRadius)
-              hm.add(r, c, -this.w.britHuntCenter)
+            const dist = hexDistance(this.lastKnownGermanPos!, { q: c, r })
+            if (dist <= 1) hm.add(r, c, -6) // 中心强力吸引(缠住)
+            else if (dist <= huntRadius) hm.add(r, c, -(4 - dist * 0.6)) // 扩散圈梯度
+            else if (dist <= huntRadius + 2) hm.add(r, c, 1) // 扩散圈外围轻微排斥→散开
           }
       }
-      // 如果俾斯麦与英军同格(位置公开,伪装缠住) → 全图 swarm
-      if (state.germanPositionPublic) {
+      // 如果俾斯麦与英军同格(被缠住) → 全图 swarm 到该格
+      if (state.bismarckFound) {
         const bPos = state.germanPositions.get('bismarck')
         if (bPos) {
           for (const sh of state.britishShips) {
@@ -654,8 +582,8 @@ class BritishBrain {
       }
     } else if (picked === 'patrol') {
       // 蹲航路: 专注大西洋+非洲航路，不碰F7
-      for (const l of ['D2','D3','C3','C4','D5','E1','F4','E4','E5']) {
-        const rc = rcOf(l); if (rc) hm.add(rc[0], rc[1], -this.w.britPatrolPull)
+      for (const l of ['D2','D3','C3','C4','D5','E1','E4','E5']) {
+        const rc = rcOf(l); if (rc) hm.add(rc[0], rc[1], -3)
       }
       // 德军冲港必经路口 (轻量吸引)
       for (const l of ['D7','C7','D6']) {
@@ -663,11 +591,9 @@ class BritishBrain {
       }
     } else if (picked === 'defend') {
       // 死守F7 (仅在德军确实靠近时触发)
-      const f7Pull = f7Urgent ? this.w.britDefendPull * 2 : this.w.britDefendPull  // 紧急时翻倍
-      const f7rc = rcOf('F7'); if (f7rc) { hm.set(f7rc[0], f7rc[1], -f7Pull) }
-      const f7NbPull = f7Urgent ? -6 : -3  // 紧急时F7邻格也翻倍
+      const f7rc = rcOf('F7'); if (f7rc) { hm.set(f7rc[0], f7rc[1], -6) }
       for (const nb of hexNeighbors({ q: 5, r: 6 })) {
-        const nl = hexToLabel(nb); if (nl) { const rc = rcOf(nl); if (rc) hm.add(rc[0], rc[1], f7NbPull) }
+        const nl = hexToLabel(nb); if (nl) { const rc = rcOf(nl); if (rc) hm.add(rc[0], rc[1], -3) }
       }
     }
 
@@ -699,7 +625,6 @@ class BritishBrain {
       const britProbs = softmax([search, hunt, patrol, defend], this.w.temperature)
       debugInfo = {
         heatmap: hm.getData(),
-        germanPossibleHeatmap: baseHeatmap,
         strategyScores: sNames.map((s, i) => ({ name: s, raw: [search, hunt, patrol, defend][i], prob: britProbs[i] })),
         moveScores: moveActions.map((a: any, i: number) => {
           const rc = rcOf(a.params?.targetLabel || '')
@@ -749,14 +674,13 @@ class BritishBrain {
   }
 
   private germanNearF7(state: GameState): boolean {
-    // 只有位置公开或曾目击才能判断德军是否近F7
-    if (!state.germanPositionPublic && !this.lastKnownGermanPos) return false
     const f7 = rcOf('F7'); if (!f7) return false
-    const checkPos = state.germanPositionPublic
-      ? state.germanPositions.get('bismarck') // 位置公开→实时
-      : this.lastKnownGermanPos // 否则用最后目击
-    if (!checkPos) return false
-    return hexDistance(checkPos, { q: f7[1], r: f7[0] }) <= 4
+    for (const gs of state.germanShips) {
+      if (gs.steps <= 0) continue
+      const pos = state.germanPositions.get(gs.def.id); if (!pos) continue
+      if (hexDistance(pos, { q: f7[1], r: f7[0] }) <= 4) return true
+    }
+    return false
   }
 
   private countShipsNear(state: GameState, label: string, dist: number): number {
@@ -772,13 +696,12 @@ class BritishBrain {
 }
 
 // ========== 导出 ==========
-export function createStateMachineAI(weights?: Weights, gerPropagation: PropMode = 'off', britPropagation: PropMode = 'off', britWeights?: Weights) {
+export function createStateMachineAI(weights?: Weights, gerPropagation: PropMode = 'off', britPropagation: PropMode = 'off') {
   const w = weights || DEFAULT_WEIGHTS
-  const britW = britWeights || w
   const german = new GermanBrain(w, gerPropagation)
-  const british = new BritishBrain(britW, britPropagation)
+  const british = new BritishBrain(w, britPropagation)
   return {
-    german, british, weights: w, britWeights: britW,
+    german, british, weights: w,
     selectGerman(obs: any, debug?: boolean) { return german.selectAction(obs, debug) },
     selectBritish(obs: any, debug?: boolean) { return british.selectAction(obs, debug) },
   }

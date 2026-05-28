@@ -2,7 +2,7 @@ import { BismarckEnv } from './engine/env'
 import { LLMClient } from './cli/llm-client'
 import * as fs from 'fs'
 
-const KEY = 'sk-cfd4012560484e49bfca9c02cda7277d'
+const KEY = process.env.DEEPSEEK_API_KEY || ''
 
 const RULES = `## 击沉俾斯麦号 游戏规则
 

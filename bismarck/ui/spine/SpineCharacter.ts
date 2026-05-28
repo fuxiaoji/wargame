@@ -1,69 +1,52 @@
 /**
- * SpineCharacter — 单个 spine 角色实例 (spine-ts 3.6)
+ * SpineCharacter — PixiJS + @pixi-spine/all-3.8
+ * 直接加载 .skel 二进制，不需要 JSON 转换
  */
-import { ANIM_MAP, type SpineAsset } from './SpineManager'
+import { Application } from 'pixi.js'
+import { Spine } from '@pixi-spine/all-3.8'
+import { ANIM_MAP, type SpineSkelAsset } from './SpineManager'
 
 export type AnimEvent = 'idle' | 'selected' | 'moving' | 'attack' | 'damaged' | 'victory'
 
 export class SpineCharacter {
-  private canvas: HTMLCanvasElement
-  private ctx: CanvasRenderingContext2D
-  private renderer: spine.canvas.SkeletonRenderer
-  private skeleton: spine.Skeleton
-  private animState: spine.AnimationState
-  private asset: SpineAsset
-
+  private app: Application
+  private spine: Spine | null = null
+  private animationNames: string[] = []
   private currentAnim: AnimEvent = 'idle'
-  private animFrameId = 0
-  private lastTime = 0
-  private _destroyed = false
 
-  constructor(asset: SpineAsset, canvasW: number, canvasH: number) {
-    this.asset = asset
-    this.canvas = document.createElement('canvas')
-    this.canvas.width = canvasW
-    this.canvas.height = canvasH
+  constructor(asset: SpineSkelAsset, canvasW: number, canvasH: number) {
+    this.app = new Application({
+      width: canvasW, height: canvasH,
+      backgroundAlpha: 0, antialias: true, resolution: 1,
+    })
 
-    const ctx = this.canvas.getContext('2d')!
-    this.ctx = ctx
-    this.renderer = new spine.canvas.SkeletonRenderer(ctx)
-    this.renderer.triangleRendering = true  // 启用 mesh/linked-mesh/clipping 渲染
+    const sd = asset.spineData
+    this.animationNames = sd.animations.map((a: any) => a.name)
 
-    this.skeleton = new spine.Skeleton(asset.skeletonData)
+    this.spine = new Spine(sd)
+    const dw = Math.abs(sd.width) || 250
+    const dh = Math.abs(sd.height) || 350
+    const s = Math.min(canvasW / dw * 0.85, canvasH / dh * 0.85, 1.0)
+    this.spine.scale.set(s)
+    this.spine.x = canvasW / 2
+    this.spine.y = canvasH * 0.78
 
-    // 根据骨架数据计算合适的缩放
-    const dataW = Math.abs(asset.skeletonData.width) || 250
-    const dataH = Math.abs(asset.skeletonData.height) || 350
-    const scaleX = canvasW / dataW * 0.85
-    const scaleY = canvasH / dataH * 0.85
-    const scale = Math.min(scaleX, scaleY, 1.0)
-
-    this.skeleton.scaleX = scale
-    this.skeleton.scaleY = scale
-    this.skeleton.x = canvasW / 2
-    this.skeleton.y = canvasH * 0.78
-    this.skeleton.setToSetupPose()
-
-    const animData = new spine.AnimationStateData(asset.skeletonData)
-    animData.defaultMix = 0.2
-    this.animState = new spine.AnimationState(animData)
-
+    this.app.stage.addChild(this.spine)
     this._playAnimation('idle')
   }
 
   private _playAnimation(event: AnimEvent): void {
+    if (!this.spine?.state) return
     const candidates = ANIM_MAP[event]
     if (!candidates) return
     for (const name of candidates) {
-      if (this.asset.animationNames.includes(name)) {
-        const loop = event === 'idle' || event === 'selected'
-        this.animState.setAnimation(0, name, loop)
+      if (this.animationNames.includes(name)) {
+        this.spine.state.setAnimation(0, name, event === 'idle' || event === 'selected')
         return
       }
     }
-    if (this.asset.animationNames.length > 0) {
-      this.animState.setAnimation(0, this.asset.animationNames[0], true)
-    }
+    if (this.animationNames.length > 0)
+      this.spine.state.setAnimation(0, this.animationNames[0], true)
   }
 
   setAnimation(event: AnimEvent): void {
@@ -72,43 +55,6 @@ export class SpineCharacter {
     this._playAnimation(event)
   }
 
-  getCanvas(): HTMLCanvasElement { return this.canvas }
-
-  start(): void {
-    if (this._destroyed) return
-    this.lastTime = performance.now()
-    this._tick()
-  }
-
-  stop(): void {
-    if (this.animFrameId) {
-      cancelAnimationFrame(this.animFrameId)
-      this.animFrameId = 0
-    }
-  }
-
-  private _tick = (): void => {
-    if (this._destroyed) return
-    const now = performance.now()
-    const delta = Math.min((now - this.lastTime) / 1000, 0.1)
-    this.lastTime = now
-
-    if (this.currentAnim === 'damaged' && this.animState.getCurrent(0)?.isComplete()) {
-      this.currentAnim = 'idle'
-      this._playAnimation('idle')
-    }
-
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
-    this.animState.update(delta)
-    this.animState.apply(this.skeleton)
-    this.skeleton.updateWorldTransform()
-    this.renderer.draw(this.skeleton)
-
-    this.animFrameId = requestAnimationFrame(this._tick)
-  }
-
-  destroy(): void {
-    this._destroyed = true
-    this.stop()
-  }
+  getCanvas(): HTMLCanvasElement { return this.app.canvas }
+  destroy(): void { this.app.destroy(true, { children: true }) }
 }

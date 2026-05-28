@@ -1,5 +1,27 @@
 # Agent 架构与张量规范 (双 C++/TS 兼容)
 
+## 0. 项目总览 (2026-05-23)
+
+```
+击沉俾斯麦号 (Sink the Bismarck) — 双盲兵棋推演 AI 研究平台
+
+bismarck/          TS 引擎 + React GUI (npm run dev)
+cppre/             C++ 引擎 (g++ -std=c++20)
+deeplearn/         深度学习训练管线
+  agent.md         张量规范 + 架构文档 (本文件)
+  todo.md          训练实施 5 阶段计划
+  read_log.py      张量→人类可读日志
+  global_log.py    张量→双视角全局日志 (德军看到 vs 英军看到)
+  data/            训练数据目录
+    human-vs-ai/    前端人vsAI 自动保存
+    ai-vs-ai/       CLI/服务器 批量对战
+    random/         随机对战
+
+CLI 对战:  npx tsx battle-llm.ts [low|high|vs] [局数]
+数据服务:  npm run server  (接收前端数据 + 批量训练管理)
+全局日志:  python3 deeplearn/global_log.py data/human-vs-ai/game-xxx
+```
+
 ## 1. 输入张量: `[73, 128, 8, 6]`
 
 ### 1.1 维度

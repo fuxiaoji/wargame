@@ -15,13 +15,14 @@ import { Dashboard } from '../ui/components/Dashboard'
 import { GameLog } from '../engine/log'
 import { BismarckEnv, GameAction } from '../engine/env'
 import type { CombatResult } from '../engine/combat'
-import { GERMAN_START_HEXES, hexNeighbors } from '../engine/map'
+import { GERMAN_START_HEXES, hexNeighbors, hexDistance, labelToHex } from '../engine/map'
 import { BRITISH_FIXED_POSITIONS } from '../engine/setup'
 import { getGermanReachableLabels } from '../engine/movement'
 import { useTensorLogger } from '../ui/hooks/useTensorLogger'
-import { GERMAN_PRESETS, BRITISH_PRESETS, findPresetWeights } from '../cli/presets'
+import { GERMAN_PRESETS, BRITISH_PRESETS, findPresetWeights, V8_GERMAN_BEST, V8_BRITISH_BEST, V11_GERMAN_BEST, V11_BRITISH_BEST } from '../cli/presets'
 import { createStateMachineAI, DEFAULT_WEIGHTS } from '../cli/state-machine'
 import type { AIDebugInfo } from '../cli/state-machine'
+import { createYanfuAI } from '../cli/state-machine-yanfu'
 import { AIInternalsPanel } from '../ui/components/AIInternalsPanel'
 
 function loadCalibration() {
@@ -32,7 +33,7 @@ function loadCalibration() {
   return { scale: parseFloat(s), offX: parseFloat(x), offY: parseFloat(y) }
 }
 
-type AISide = null | 'german' | 'british' | 'sm-german' | 'sm-british'
+type AISide = null | 'german' | 'british' | 'sm-german' | 'sm-british' | 'yanfu-german' | 'yanfu-british'
 
 const MAP_DESC = `地图(字母A-F从上到下,数字1-8从左到右,奇数列B/D/F左偏):
 A列: A3 A4 A5 A6
@@ -147,6 +148,9 @@ export default function App() {
   const [showAIConfig, setShowAIConfig] = useState(false)
   const [showBaseHeatmap, setShowBaseHeatmap] = useState(false)
   const [showPrediction, setShowPrediction] = useState(false)
+  const [showBritAIHeatmap, setShowBritAIHeatmap] = useState(false)
+  const showBritAIHeatmapRef = useRef(false)
+  const [britAIHeatmap, setBritAIHeatmap] = useState<Float32Array | null>(null)
   const [showDebug, setShowDebug] = useState(false)
   const showDebugRef = useRef(false)
   const [smDebugData, setSmDebugData] = useState<AIDebugInfo[]>([])
@@ -182,28 +186,61 @@ export default function App() {
     }
     return hm
   }, [gameState?.turn, gameState?.phase, showBaseHeatmap])
-  // 德军可能位置推演 (人玩英军可选)
+  // 德军可能位置推演 (人玩英军可选, 与 BritishBrain 基图扩散逻辑一致)
   const predictionHeatmap = useMemo(() => {
     if (!gameState || !showPrediction) return null
     const hm = new Float32Array(48)
+    const H = 8, W = 6
+    const britDiffuseStr = 0.25  // 与 Weights 默认值一致
     if (gameState.germanPositionPublic) {
+      // 伪装鉴定失败 → 精准实时位置, 无扩散
       for (const [id, pos] of gameState.germanPositions) {
-        const idx = pos.r * 6 + pos.q; if (idx >= 0 && idx < 48) hm[idx] += 5
+        const idx = pos.r * W + pos.q; if (idx >= 0 && idx < 48) hm[idx] += 3
+      }
+    } else if (gameState.failedDummies.size > 0) {
+      // 失败伪装持续跟随俾斯麦 → 伪装位置 = 德军精确位置
+      for (const dummyId of gameState.failedDummies) {
+        const pos = gameState.britishPositions.get(dummyId)
+        if (pos) { const idx = pos.r * W + pos.q; if (idx >= 0 && idx < 48) hm[idx] += 3 }
       }
     } else {
-      // 从未发现: 从出生点速2扩散
-      for (const label of GERMAN_START_HEXES) {
-        const h = { q: label.charCodeAt(0)-65, r: parseInt(label.slice(1)) }
-        if (h.q < 0 || h.q >= 6 || h.r < 1 || h.r > 8) continue
-        const dummyShip = { def: { speed: 2 }, steps: 2 } as any
-        for (const l of getGermanReachableLabels(dummyShip, h)) {
-          const c = l.charCodeAt(0) - 65; const rr = parseInt(l.slice(1))
-          const idx = rr * 6 + c; if (idx >= 0 && idx < 48) hm[idx] += 3
+      // 确定中心点和扩散半径 (r 使用 0-indexed, 与 state-machine 一致)
+      type HC = {q:number;r:number}
+      let centers: HC[] = []
+      let radius: number
+      if (gameState.lastSightingHex) {
+        const rc = gameState.lastSightingHex.charCodeAt(0) - 65
+        const rr = parseInt(gameState.lastSightingHex.slice(1)) - 1  // 0-indexed
+        if (rc >= 0 && rc < W && rr >= 0 && rr < H) {
+          centers = [{q:rc, r:rr}]
+          const turnsSinceSeen = Math.max(1, gameState.turn - (gameState.lastSightingTurn || 0))
+          radius = Math.min(turnsSinceSeen * 2, 8)
+        } else {
+          radius = 0
+        }
+      }
+      if (centers.length === 0) {
+        // 无目击: 从德军出生点扩散
+        centers = GERMAN_START_HEXES.map(l => {
+          const rc = l.charCodeAt(0) - 65; const rr = parseInt(l.slice(1)) - 1  // 0-indexed
+          return (rc >= 0 && rc < W && rr >= 0 && rr < H) ? {q:rc, r:rr} as HC : null
+        }).filter(Boolean) as HC[]
+        radius = Math.min(gameState.turn * 2, 8)
+      }
+      // 并集扩散: 每个格只要在任一中心半径内即加引力, 不重叠累积
+      for (let r = 0; r < H; r++) {
+        for (let c = 0; c < W; c++) {
+          for (const center of centers) {
+            if (hexDistance(center, {q:c, r}) <= radius) {
+              hm[r * W + c] += britDiffuseStr
+              break
+            }
+          }
         }
       }
     }
     return hm
-  }, [gameState?.turn, gameState?.phase, gameState?.germanPositionPublic, showPrediction])
+  }, [gameState?.turn, gameState?.phase, gameState?.germanPositionPublic, gameState?.lastSightingHex, gameState?.lastSightingTurn, showPrediction])
   const [debugLines, setDebugLines] = useState<{ time: string; text: string; color: string }[]>([])
   const [aiReasoning, setAIReasoning] = useState('')  // AI思考过程展示
   const [aiLevel, setAiLevel] = useState<'low'|'high'>(() => (localStorage.getItem('bismarck_ai_level') as 'low'|'high') || 'low')
@@ -265,7 +302,7 @@ export default function App() {
 
   const currentPlayer: 'german' | 'british' = isGermanPhase ? 'german' : 'british'
   const isAITurn = aiSide !== null && (
-    currentPlayer === (aiSide === 'sm-german' ? 'german' : aiSide === 'sm-british' ? 'british' : aiSide)
+    currentPlayer === (aiSide === 'sm-german' || aiSide === 'yanfu-german' ? 'german' : aiSide === 'sm-british' || aiSide === 'yanfu-british' ? 'british' : aiSide)
   )
 
   // ===== AI 自动回合 =====
@@ -276,12 +313,64 @@ export default function App() {
       aiRunningRef.current = true
       addDebug('═══ AI回合启动 ═══', '#fbbf24')
 
+      // === 严父脚本化AI ===
+      const isYanfu = aiSide === 'yanfu-german' || aiSide === 'yanfu-british'
+      if (isYanfu) {
+        const yanfuEnv = new BismarckEnv(); (yanfuEnv as any).game = game
+        const ai = createYanfuAI()
+        const isYanfuGerman = aiSide === 'yanfu-german'
+        addDebug('严父AI', '#f59e0b')
+
+        let yanfuSteps = 0, yanfuStuck = 0, yanfuLast = ''
+        while (!gameState.gameOver && yanfuSteps < 300) {
+          const obs = yanfuEnv.getObservation(); (obs as any).raw = game.state
+          const isGermanP = obs.phase === 'setup-german' || obs.phase === 'german-move' || obs.phase === 'transport-attack'
+          if (isYanfuGerman && !isGermanP) break
+          if (!isYanfuGerman && isGermanP) break
+          if (obs.phase !== 'setup-british' && obs.actions.length === 0) break
+          if (obs.phase === yanfuLast) yanfuStuck++; else { yanfuStuck = 0; yanfuLast = obs.phase }
+          if (yanfuStuck > 15) {
+            const f = obs.actions.find((a: any) => a.type === 'finish-phase')
+            if (f) { yanfuEnv.step(f); yanfuStuck = 0; continue }
+          }
+
+          if (obs.phase === 'setup-british') {
+            const s = game.state
+            const used = new Set<string>(GERMAN_START_HEXES)
+            for (const [hex, shipIds] of Object.entries(BRITISH_FIXED_POSITIONS)) { used.add(hex); for (const id of shipIds) game.placeBritishToken(id, hex) }
+            const seaRoutes = ['D2','D3','C3','C4','D5','E1','F4','E4','E5']
+            for (const sh of s.britishShips) {
+              if (s.britishPositions.has(sh.def.id)) continue
+              const route = seaRoutes[Math.floor(Math.random() * seaRoutes.length)]
+              const rc = labelToHex(route); if (rc) game.placeBritishToken(sh.def.id, route)
+            }
+            const fallback = ['E7','E5','E3','E2','E1','D8','D5','D4','D3','D2','D1','C7','C1','B6','F6','F5','F3','F2','A3','A4','B4']
+            for (const sh of s.britishShips) if (!s.britishPositions.has(sh.def.id)) game.placeBritishToken(sh.def.id, fallback[Math.floor(Math.random()*fallback.length)])
+            game.finishSetup()
+            refresh(); yanfuSteps++; await new Promise(r => setTimeout(r, 300)); continue
+          }
+
+          const result = isYanfuGerman ? ai.selectGerman(obs) : ai.selectBritish(obs)
+          if (result.actionId != null) {
+            const a = obs.actions.find((x: any) => x.id === result.actionId)
+            if (a) yanfuEnv.step(a); else if (obs.actions.length > 0) yanfuEnv.step(obs.actions[0])
+          } else if (obs.actions.length > 0) yanfuEnv.step(obs.actions[0])
+          yanfuSteps++
+          refresh()
+          await new Promise(r => setTimeout(r, 300))
+        }
+        aiRunningRef.current = false
+        addDebug(isYanfuGerman ? '德军回合结束' : '英军回合结束', '#f59e0b')
+        return
+      }
+
       // === 状态机快速路径 (不调LLM) ===
       const isSM = aiSide === 'sm-german' || aiSide === 'sm-british'
       if (isSM) {
         const smEnv = new BismarckEnv(); (smEnv as any).game = game
-        const gerW = gerPreset?.weights || findPresetWeights(smVersion, smGerIdx) || DEFAULT_WEIGHTS
-        const ai = createStateMachineAI(gerW)
+        const gerW = smVersion === 'training_v11' ? V11_GERMAN_BEST : smVersion === 'training_v8' ? V8_GERMAN_BEST : (gerPreset?.weights || findPresetWeights(smVersion, smGerIdx) || DEFAULT_WEIGHTS)
+        const britW = smVersion === 'training_v11' ? V11_BRITISH_BEST : smVersion === 'training_v8' ? V8_BRITISH_BEST : (britPreset?.weights || findPresetWeights(smVersion, smBritIdx) || undefined)
+        const ai = createStateMachineAI(gerW, 'off', 'off', britW)
         const isSMGerman = aiSide === 'sm-german'
         addDebug(`状态机: ${smVersion} Gen${smGen} 德#${smGerIdx}(${gerPreset?.style||'?'}) 英#${smBritIdx}(${britPreset?.style||'?'})`, '#a78bfa')
 
@@ -355,14 +444,24 @@ export default function App() {
           // 新阶段 → 清空buffer
           if (obs.phase !== smLast) { phaseDebugBuffer = []; setSmDebugActiveIndex(0) }
           const dbg = showDebugRef.current
-          const result = obs.activePlayer === 'german' ? ai.selectGerman(obs, dbg) : ai.selectBritish(obs, dbg)
+          const britWantHeatmap = !isSMGerman && showBritAIHeatmapRef.current
+          const wantDebug = dbg || britWantHeatmap
+          if (britWantHeatmap) console.log('britWantHeatmap=true, phase=', obs.phase, 'activePlayer=', obs.activePlayer, 'isSMGerman=', isSMGerman)
+          const result = obs.activePlayer === 'german' ? ai.selectGerman(obs, dbg) : ai.selectBritish(obs, wantDebug)
           if (dbg && 'debug' in result && (result as any).debug) {
             phaseDebugBuffer.push((result as any).debug)
+          }
+          if (!dbg && britWantHeatmap && (result as any).debug) {
+            const baseHm = (result as any).debug.germanPossibleHeatmap || (result as any).debug.heatmap
+            if (baseHm) setBritAIHeatmap(new Float32Array(baseHm))
           }
           // 执行动作 (调试模式下不立即刷新)
           if (result.actionId != null) {
             const a = obs.actions.find(x => x.id === result.actionId)
-            if (a) smEnv.step(a); else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
+            if (a) {
+              if (a.type === 'combat') setCombatResult(game.doCombat())
+              else smEnv.step(a)
+            } else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
           } else if (obs.actions.length > 0) smEnv.step(obs.actions[0])
           smSteps++
           if (!dbg) refresh()
@@ -824,18 +923,26 @@ export default function App() {
             className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs"
           >
             <option value="none">👥 双人对战</option>
-            <option value="german">🤖 AI德军(LLM)</option>
-            <option value="british">🤖 AI英军(LLM)</option>
+            <option value="yanfu-german">👊 严父德军</option>
+            <option value="yanfu-british">👊 严父英军</option>
             <option value="sm-german">🧠 状态机德军</option>
             <option value="sm-british">🧠 状态机英军</option>
+            <option value="german">🤖 AI德军(LLM)</option>
+            <option value="british">🤖 AI英军(LLM)</option>
           </select>
           {/* 状态机个体选择 */}
           {(aiSide === 'sm-german' || aiSide === 'sm-british') && (
             <>
               <select value={smVersion} onChange={e => { setSmVersion(e.target.value); localStorage.setItem('bismarck_sm_ver', e.target.value) }}
                 className="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">
-                <option value="training_v1">V1(KL)</option>
-                <option value="training_v2">V2(MAP)</option>
+                <option value="training_v1">V1</option>
+                <option value="training_v2">V2</option>
+                <option value="training_v3">V3</option>
+                <option value="training_v4">V4</option>
+                <option value="training_v5">V5</option>
+                <option value="training_v7">V7</option>
+                <option value="training_v11">V11</option>
+                <option value="training_v8">V8</option>
               </select>
               <span className="text-xs text-slate-500">德#</span>
               <input value={smGerIdx} onChange={e => { setSmGerIdx(parseInt(e.target.value)||0); localStorage.setItem('bismarck_sm_ger', e.target.value) }}
@@ -894,12 +1001,17 @@ export default function App() {
               </button>
             </>
           )}
-          {(aiSide === 'sm-british' || aiSide === 'british' || aiSide === null) && (
+          {(aiSide === 'sm-british' || aiSide === 'british' || aiSide === 'yanfu-british' || aiSide === null) && (
             <button onClick={() => setShowBaseHeatmap(!showBaseHeatmap)}
               className={`px-2 py-1 text-xs rounded border ${showBaseHeatmap ? 'bg-amber-700 border-amber-500 text-amber-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
               title="显示英军算子热力图(德军视角)">🔥 热力</button>
           )}
-          {(aiSide === 'sm-german' || aiSide === 'german') && (
+          {aiSide === 'sm-british' && (
+            <button onClick={() => { const v = !showBritAIHeatmap; setShowBritAIHeatmap(v); showBritAIHeatmapRef.current = v; if (!v) setBritAIHeatmap(null) }}
+              className={`px-2 py-1 text-xs rounded border ${showBritAIHeatmap ? 'bg-cyan-700 border-cyan-500 text-cyan-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
+              title="英军AI视角: 德军可能位置热力图">🧠 英军视角</button>
+          )}
+          {(aiSide === 'sm-german' || aiSide === 'german' || aiSide === 'yanfu-german') && (
             <button onClick={() => setShowPrediction(!showPrediction)}
               className={`px-2 py-1 text-xs rounded border ${showPrediction ? 'bg-purple-700 border-purple-500 text-purple-200' : 'bg-slate-700 border-slate-500 text-slate-300'}`}
               title="显示英军AI推演的德军可能位置">🎯 推演</button>
@@ -950,9 +1062,9 @@ export default function App() {
             highlightedHexes={highlightedHexes}
             selectedHex={selectedHex}
             showGermanPositions={
-              (aiSide === 'british' || aiSide === 'sm-british') ||  // 人玩德军 → 始终看己方
-              (aiSide === null && isGermanPhase) ||  // 双人按阶段切换
-              ((aiSide === 'german' || aiSide === 'sm-german') && gameState.germanPositionPublic)  // 人玩英军 → 仅伪装鉴定失败时
+              (aiSide === 'british' || aiSide === 'sm-british' || aiSide === 'yanfu-british') ||  // 人玩德军 → 始终看己方
+              (aiSide === null && isGermanPhase)  // 双人按阶段切换
+              // 人玩英军不直接显示德军位置, 用推演按钮(🎯)自行判断
             }
             transportRevealedHex={gameState.transportRevealedHex}
             onHexClick={handleHexClick}
@@ -963,7 +1075,7 @@ export default function App() {
             zoom={mapZoom}
             selectedShip={selectedShip}
             displayMode={displayMode}
-            heatmapData={showDebug && smDebugData.length > 0 ? (smDebugActiveIndex >= 0 ? smDebugData[smDebugActiveIndex]?.heatmap ?? null : showPrediction ? predictionHeatmap : null) : showBaseHeatmap ? baseHeatmap : showPrediction ? predictionHeatmap : null}
+            heatmapData={showBritAIHeatmap && britAIHeatmap ? britAIHeatmap : showDebug && smDebugData.length > 0 ? (smDebugActiveIndex >= 0 ? smDebugData[smDebugActiveIndex]?.heatmap ?? null : showPrediction ? predictionHeatmap : null) : showBaseHeatmap ? baseHeatmap : showPrediction ? predictionHeatmap : null}
           />
         </div>
 
@@ -1092,10 +1204,12 @@ export default function App() {
                 )}
               </div>
             )}
-            <div className="bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs font-mono max-h-32 overflow-y-auto">
-              {log.entries.slice(-8).map((e, i) => {
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs font-mono max-h-48 overflow-y-auto">
+              <div className="text-slate-500 mb-1 border-b border-slate-700 pb-1">📋 事件日志</div>
+              {log.entries.slice(-15).map((e, i) => {
                 const colors: Record<string, string> = { setup: 'text-slate-400', move: 'text-cyan-400', search: 'text-yellow-400', combat: 'text-red-400', transport: 'text-green-400', turn: 'text-slate-500', victory: 'text-amber-400' }
-                return <div key={i} className={colors[e.type] || 'text-slate-500'}>T{e.turn} {e.message}</div>
+                const isCritical = e.message.includes('伪装鉴定') || e.message.includes('发现德军') || e.message.includes('击沉')
+                return <div key={i} className={`${colors[e.type] || 'text-slate-500'}${isCritical ? ' bg-slate-800 rounded px-1 -mx-1 font-bold' : ''}`}>T{e.turn} {e.message}</div>
               })}
               {log.entries.length === 0 && <div className="text-slate-600">等待开局...</div>}
             </div>

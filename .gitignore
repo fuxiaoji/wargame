@@ -1,4 +1,36 @@
+# OS
 .DS_Store
+
+# Dependencies
+node_modules/
+
+# Build outputs
+cppre/tournament
+cppre/llm_logger
+
+# Training data (large binaries)
+deeplearn/data/
+
+# Battle logs
+bismarck/battle_logs/
+bismarck/battle_log_*.txt
+
+# Tournament data
+bismarck/tournament/
+tournament/
+
+# LLM logs (may contain API keys in prompts)
+cppre/llm_prompts.log
+
+# Secrets / API keys
+api.md
+text/游戏引擎/api.md
+
+# Spine test artifacts
+bismarck/public/spine/json-output/
+public/spine-anim-test.html
+
+# Runtime state
 battle-state.json
 battle-logs/
-api.md
+monitor.sh

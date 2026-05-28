@@ -12,15 +12,9 @@
 #include <unordered_map>
 
 struct Weights {
-    float w1=8,w2=3,w3=2,w4=4, w5=3,w6=4,w7=2,w8=2, w9=4,w10=2,w11=2, w12=1,w13=2,w14=1,w15=2;
+    float w1=8,w2=3,w3=2,w4=4, w5=3,w6=2,w7=2,w8=1, w9=4,w10=2,w11=2, w12=1,w13=2,w14=1,w15=2;
     float rushF7Pull=-10, rushPathPull=1.0f, farmBasePull=2, farmVPScale=0.5f;
     float huntPull=3, hidePush=8, rushVPPenalty=4.0f, rushVPReward=3.0f;
-    // 英军热力系数 (可训练)
-    float britDiffuseStr=0.25f;  // 扩散强度
-    float britPatrolPull=3.0f;   // patrol 航路引力
-    float britDefendPull=6.0f;   // defend F7引力
-    float britHuntCenter=6.0f;   // hunt 中心引力
-    float britSearchRepel=2.0f;  // search 船间排斥
     float s1=10,s2=0.5f,s3=1, h1=10,h2=5,h3=3, p1=3,p2=2,p3=2, d1=5,d2=3,d3=4;
     float temperature = 1.0f;
 };
@@ -201,8 +195,7 @@ struct GermanBrain {
             if (nearby == 0) isolatedTargets++;
         }
         float hunt = w.w9 * isolatedTargets + w.w10*0.5f - w.w11*nearbyBrit;
-        bool mustHide = (st.bismarckFound && !vpLead) || (curShip->steps < 2);
-        float hide = w.w12*(mustHide?2:(st.bismarckFound?1:0)) + w.w13*(curShip->steps<2?1:0) + w.w14*avgProx - w.w15*(1-st.vp.german/6.0f);
+        float hide = w.w12*(st.bismarckFound?1:0) + w.w13*(curShip->steps<2?1:0) + w.w14*avgProx - w.w15*(1-st.vp.german/6.0f);
 
         // 船特定修正
         bool isBismarck = curShip->def.id == "bismarck";
@@ -225,7 +218,7 @@ struct GermanBrain {
               for (int i=0;i<6;i++) { auto [r,c]=rcOf(wp[i]); if (r>=0) hm.set(r,c,hm.get(r,c)+wv[i]*w.rushPathPull); } }
         } else if (lastStrategy == "farm") {
             float farmPull = -(w.farmBasePull + (6 - st.vp.german) * w.farmVPScale);
-            for (auto& l : {"D2","D3","C3","C4","D5","E1","F4","E4","E5"}) { auto [r,c]=rcOf(l); if (r>=0) hm.set(r,c,hm.get(r,c)+farmPull); }
+            for (auto& l : {"D2","D3","C3","C4","D5","E1","E4","E5"}) { auto [r,c]=rcOf(l); if (r>=0) hm.set(r,c,hm.get(r,c)+farmPull); }
         } else if (lastStrategy == "hunt") {
             // 主动猎杀: 孤立英军目标周围吸引
             for (auto& sh : st.britishShips) {
@@ -280,9 +273,7 @@ struct GermanBrain {
 struct BritishBrain {
     Weights w;
     HexCoord lastKnownGermanPos{0,0}; bool hasLastKnown = false;
-    int lastSeenTurn = 0;
-    int prevLastSightingTurn = 0;
-    int prevVpGerman = 0;
+    int turnsSinceSeen = 0;
 
     int selectAction(const GameState& st, const std::vector<GameAction>& actions, const std::string& phase) {
         if (phase == "british-search") {
@@ -309,129 +300,45 @@ struct BritishBrain {
                 [](auto& s){ return s.def.id == "bismarck" && s.steps > 0; });
             if (bismarck != st.germanShips.end()) {
                 auto bp = st.germanPositions.find("bismarck");
-                if (bp != st.germanPositions.end() && st.germanPositionPublic) {
-                    // 伪装鉴定失败 → 精准实时位置
-                    lastKnownGermanPos = bp->second; hasLastKnown = true; lastSeenTurn = st.turn;
+                if (bp != st.germanPositions.end() && (st.germanPositionPublic || st.bismarckFound)) {
+                    lastKnownGermanPos = bp->second; hasLastKnown = true; turnsSinceSeen = 0;
                 }
             }
-            // 失败伪装持续跟随俾斯麦 → 伪装位置 = 德军精确位置
-            if (!st.failedDummies.empty()) {
-                for (auto& dummyId : st.failedDummies) {
-                    auto p = st.britishPositions.find(dummyId);
-                    if (p != st.britishPositions.end()) {
-                        lastKnownGermanPos = p->second; hasLastKnown = true; lastSeenTurn = st.turn;
-                        break;
-                    }
-                }
-            }
-            // lastSightingTurn 变化 → 新目击发生 (即使同格反复目击也能检测)
-            if (st.lastSightingTurn > 0 && st.lastSightingTurn != prevLastSightingTurn) {
-                prevLastSightingTurn = st.lastSightingTurn;
-                if (!st.lastSightingHex.empty()) {
-                    auto [sr, sc] = rcOf(st.lastSightingHex);
-                    if (sr >= 0) {
-                        lastKnownGermanPos = {sc, sr}; hasLastKnown = true;
-                        lastSeenTurn = st.lastSightingTurn;  // 目击发生的回合
-                    }
-                }
-            }
-            int turnsSinceSeen = (st.germanPositionPublic || !st.failedDummies.empty()) ? 0 : std::max(1, st.turn - lastSeenTurn);
-            int germanSpeed = (bismarck != st.germanShips.end() && bismarck->steps > 0)
-                ? (bismarck->steps >= bismarck->def.maxSteps ? bismarck->def.speed : std::max(1, bismarck->def.speed - 1)) : 2;
+            if (!st.bismarckFound) turnsSinceSeen++;
 
             // 主动防守 + patrol
             float proactive = (st.turn >= 8 ? 1.0f : 0) + (st.vp.german >= 3 ? 1.0f : 0) + (st.vp.german >= 5 ? 2.0f : 0);
             bool inGerRange = hasLastKnown && hexDistance(pos, lastKnownGermanPos) <= turnsSinceSeen*2+2;
             bool onRoute = isSeaRoute(pos);
-            float distToLast = hasLastKnown ? hexDistance(pos, lastKnownGermanPos) : 8.0f;
-            // germanNearF7 (与 TS 一致)
-            bool germanNearF7 = false;
-            {
-                auto f7rc = rcOf("F7");
-                if (f7rc.first >= 0) {
-                    HexCoord f7 = {f7rc.second, f7rc.first};
-                    HexCoord checkPos = lastKnownGermanPos;
-                    if (st.germanPositionPublic) {
-                        auto bp = st.germanPositions.find("bismarck");
-                        if (bp != st.germanPositions.end()) checkPos = bp->second;
-                    }
-                    if (st.germanPositionPublic || hasLastKnown)
-                        germanNearF7 = hexDistance(checkPos, f7) <= 4;
-                }
-            }
-            // shipsNearF7 (与 TS 一致)
-            int shipsNearF7 = 0;
-            {
-                auto f7rc = rcOf("F7");
-                if (f7rc.first >= 0) {
-                    HexCoord f7 = {f7rc.second, f7rc.first};
-                    for (auto& sh : st.britishShips) {
-                        if (sh.steps <= 0) continue;
-                        auto p = st.britishPositions.find(sh.def.id);
-                        if (p != st.britishPositions.end() && hexDistance(p->second, f7) <= 3) shipsNearF7++;
-                    }
-                }
-            }
-            float searchS = w.s1*(!st.bismarckFound?1:0) - w.s2*turnsSinceSeen - w.s3*st.vp.german;
+            float searchS = w.s1*(!st.bismarckFound?1:0) - w.s2*turnsSinceSeen - w.s3*st.vp.german/2.0f;
             // hunt拥挤惩罚: 超过5艘在目标附近→扣分
             int huntCount = 0;
             for (auto& sh : st.britishShips) if (sh.steps>0){ auto p=st.britishPositions.find(sh.def.id); if(p!=st.britishPositions.end()&&hexDistance(p->second,hasLastKnown?lastKnownGermanPos:pos)<=4)huntCount++; }
             float huntCrowd = std::max(0, huntCount-5)*1.5f;
 
             float patrolS = w.p1*(onRoute?1:0) + w.p2*(inGerRange?1:0) + w.p3*(1-(st.bismarckFound?0.5f:0));
-            float defendS = w.d1*(germanNearF7?1:0) + w.d2*(st.vp.german>=5?1:0) + w.d3*(1-shipsNearF7/5.0f) + proactive;
-            float huntS = w.h1*(st.bismarckFound?1:0) + w.h2*(1.0f/(distToLast+1)) + w.h3*1 - huntCrowd;
-
-            // === V9 改进 ===
-            // I1: 扩散置信度自适应
-            HexCoord gCenter2 = hasLastKnown ? lastKnownGermanPos : HexCoord{0,0};
-            if (!hasLastKnown && !st.lastSightingHex.empty()) {
-                auto [sr,sc] = rcOf(st.lastSightingHex);
-                if (sr >= 0) gCenter2 = {sc, sr};
-            }
-            float confRadius = hasLastKnown || !st.lastSightingHex.empty() ? turnsSinceSeen * germanSpeed : st.turn * germanSpeed;
-            float confidence = std::max(0.0f, 1.0f - std::min(confRadius, 8.0f) / 8.0f);
-            float huntConfBonus = confidence * 3.0f;
-            float patrolConfBonus = (1.0f - confidence) * 2.0f;
-
-            // I2: 紧急F7防守
-            HexCoord f7 = {5, 6};
-            bool germanCouldReachF7 = hasLastKnown && hexDistance(lastKnownGermanPos, f7) <= germanSpeed;
-            bool f7Urgent = germanCouldReachF7 && st.vp.german > st.vp.british;
-
-            // I3: VP增长推断
-            bool vpSuspicious = !st.bismarckFound && st.vp.german > prevVpGerman;
-            prevVpGerman = st.vp.german;
-
-            std::vector<float> strScores{searchS, huntS + huntConfBonus, patrolS + patrolConfBonus, defendS + (f7Urgent ? 10.0f : 0)};
+            float defendS = w.d1*0 + w.d2*(st.vp.german>=5?1:0) + w.d3*1 + proactive;
+            float huntS = w.h1*(st.bismarckFound?1:0); if(hasLastKnown)huntS+=w.h2*(5.0f/(hexDistance(pos,lastKnownGermanPos)+1));
+            huntS += w.h3*1 - huntCrowd;
+            std::vector<float> strScores{searchS, huntS, patrolS, defendS};
             int picked = weightedPick(strScores, w.temperature);
 
-            // ===== 共享基图: 德军可能位置 =====
-            // 优先: 实时位置 > 最后目击(lastSighting) > 出生点
-            HexCoord gCenter; bool hasCenter = false;
-            if (hasLastKnown) { gCenter = lastKnownGermanPos; hasCenter = true; }
-            else if (!st.lastSightingHex.empty()) { auto [sr,sc]=rcOf(st.lastSightingHex); if(sr>=0){gCenter={sc,sr};hasCenter=true;} }
-            int gTurns = hasCenter ? turnsSinceSeen : st.turn;
-            int radius = std::min(gTurns * germanSpeed, 8);
-            if (hasCenter) {
+            // ===== 共享基图: 德军可能位置 (所有策略可见) =====
+            int gTurns = hasLastKnown ? turnsSinceSeen : st.turn;
+            if (hasLastKnown) {
+                int radius = std::min(gTurns * 2, 8);
                 for (int r=0;r<8;r++) for (int c=0;c<6;c++) {
-                    if (hexDistance({c,r}, gCenter) <= radius) hm.add(r,c, -w.britDiffuseStr);
+                    float d = hexDistance({c,r}, lastKnownGermanPos);
+                    if (d <= radius) hm.add(r,c, -std::max(0.2f, (radius-d)*0.25f));
                 }
             } else {
-                // 并集扩散: 每个格只要在任一出生点的半径内即加引力, 不重复叠加
-                for (int r=0;r<8;r++) for (int c=0;c<6;c++) {
-                    for (auto& l : GERMAN_START_HEXES) {
-                        auto [sr,sc] = rcOf(l); if (sr<0) continue;
-                        if (hexDistance({sc,sr}, {c,r}) <= radius) { hm.add(r,c, -w.britDiffuseStr); break; }
+                for (auto& l : GERMAN_START_HEXES) { auto [sr,sc]=rcOf(l); if(sr>=0){
+                    int radius = std::min(gTurns * 2, 8);
+                    for (int r=0;r<8;r++) for (int c=0;c<6;c++) {
+                        float d = hexDistance({sc,sr}, {c,r});
+                        if (d <= radius) hm.add(r,c, -std::max(0.2f, (radius-d)*0.25f));
                     }
-                }
-            }
-
-            // I3: VP增长推断 — 德军在航路刷运输
-            if (vpSuspicious) {
-                for (auto& l : {"D2","D3","C3","C4","D5","E1","F4","E4","E5"}) {
-                    auto [r,c] = rcOf(l); if (r>=0) hm.add(r,c, -3);
-                }
+                }}
             }
 
             // ===== 策略叠加 =====
@@ -439,7 +346,7 @@ struct BritishBrain {
                 for (auto& sh : st.britishShips) {
                     if (sh.steps <= 0 || sh.def.id == actions[0].shipId) continue;
                     auto pit = st.britishPositions.find(sh.def.id);
-                    if (pit != st.britishPositions.end()) hm.add(pit->second.r, pit->second.q, w.britSearchRepel);
+                    if (pit != st.britishPositions.end()) hm.add(pit->second.r, pit->second.q, 2);
                 }
             } else if (picked == 1) { // hunt — 扩散梯度 + 近处抱团
                 for (auto& sh : st.britishShips) {
@@ -448,14 +355,16 @@ struct BritishBrain {
                     if (pit != st.britishPositions.end() && hexDistance(pos,pit->second) <= 3) hm.add(pit->second.r, pit->second.q, -1);
                 }
                 if (hasLastKnown) {
-                    float huntRadius = std::min(turnsSinceSeen*germanSpeed+2.0f, 6.0f);
+                    float huntRadius = std::min(turnsSinceSeen*2.0f+2.0f, 6.0f);
                     for (int r=0;r<8;r++) for (int c=0;c<6;c++) {
-                        if (hexDistance({c,r}, lastKnownGermanPos) <= huntRadius)
-                            hm.add(r,c, -w.britHuntCenter);
+                        float d = hexDistance({c,r}, lastKnownGermanPos);
+                        if (d <= 1) hm.add(r,c, -6);
+                        else if (d <= huntRadius) hm.add(r,c, -(4.0f - d*0.6f));
+                        else if (d <= huntRadius+2) hm.add(r,c, 1);
                     }
                 }
-                // 如果俾斯麦位置公开(伪装缠住) → 全图 swarm
-                if (st.germanPositionPublic) {
+                // 如果俾斯麦与英军同格 → 全图 swarm
+                if (st.bismarckFound) {
                     auto bpIt = st.germanPositions.find("bismarck");
                     if (bpIt != st.germanPositions.end()) {
                         for (auto& sh : st.britishShips) {
@@ -472,18 +381,16 @@ struct BritishBrain {
                     }
                 }
             } else if (picked == 2) { // patrol — 蹲航路(不碰F7)
-                for (auto& l : {"D2","D3","C3","C4","D5","E1","F4","E4","E5"}) {
-                    auto [r,c] = rcOf(l); if (r>=0) hm.add(r,c,-w.britPatrolPull);
+                for (auto& l : {"D2","D3","C3","C4","D5","E1","E4","E5"}) {
+                    auto [r,c] = rcOf(l); if (r>=0) hm.add(r,c,-3);
                 }
                 for (auto& l : {"D7","C7","D6"}) {
                     auto [r,c] = rcOf(l); if (r>=0) hm.add(r,c,-1);
                 }
             } else { // defend — 死守F7
-                float f7Pull = f7Urgent ? w.britDefendPull * 2 : w.britDefendPull;
-                auto [fr,fc] = rcOf("F7"); if (fr>=0) hm.set(fr,fc,-f7Pull);
-                float f7NbPull = f7Urgent ? -6.0f : -3.0f;
+                auto [fr,fc] = rcOf("F7"); if (fr>=0) hm.set(fr,fc,-6);
                 for (auto& nb : hexNeighbors({5,6})) {
-                    auto nl = hexToLabel(nb); if (nl) { auto [nr,nc] = rcOf(*nl); if (nr>=0) hm.add(nr,nc,f7NbPull); }
+                    auto nl = hexToLabel(nb); if (nl) { auto [nr,nc] = rcOf(*nl); if (nr>=0) hm.add(nr,nc,-3); }
                 }
             }
 

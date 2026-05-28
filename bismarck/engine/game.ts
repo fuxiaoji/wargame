@@ -170,19 +170,18 @@ export class BismarckGame {
       return { ok: false, error: '当前不是德军移动阶段' }
     }
 
-    // 伪装鉴定失败 → 只有鉴定失败的那些伪装跟随俾斯麦 (规则 6.2)
-    if (this.state.germanPositionPublic) {
+    // 伪装鉴定失败 → 失败伪装持续跟随俾斯麦, 直到鉴定成功 (规则 6.2)
+    if (this.state.failedDummies.size > 0) {
       const bismarckPos = this.state.germanPositions.get('bismarck')
-      if (bismarckPos && this.state.failedDummies.size > 0) {
+      if (bismarckPos) {
         for (const bShip of this.state.britishShips) {
           if (this.state.failedDummies.has(bShip.def.id) && bShip.steps > 0) {
             this.state.britishPositions.set(bShip.def.id, bismarckPos)
           }
         }
       }
-      this.state.germanPositionPublic = false
-      this.state.failedDummies = new Set()
     }
+    this.state.germanPositionPublic = false
 
     // 翻回所有英军算子 (5.0)
     for (const ship of this.state.britishShips) {
@@ -245,6 +244,8 @@ export class BismarckGame {
     const result = checkCoLocationSearch(this.state)
     if (result.type === 'co-locate') {
       this.state.bismarckFound = true
+      this.state.lastSightingHex = result.germanLabel
+      this.state.lastSightingTurn = this.state.turn
       this.L('search', `同格索敌: 发现德军在 ${result.germanLabel}!`)
 
       // 6.2 伪装算子鉴定: 先处理所有被翻开的伪装算子
@@ -254,6 +255,7 @@ export class BismarckGame {
           if (idResult.removed) {
             bShip.steps = 0
             this.state.britishPositions.delete(bShip.def.id)
+            this.state.failedDummies.delete(bShip.def.id)  // 停止跟随
             this.L('search', `伪装鉴定: ${bShip.def.name} 鉴定成功，移除`)
           } else {
             this.state.germanPositionPublic = true
@@ -284,6 +286,8 @@ export class BismarckGame {
     const result = performAirSearch(this.state, adjacentLabel)
     if (result.foundShips.length > 0) {
       this.state.bismarckFound = true
+      this.state.lastSightingHex = adjacentLabel
+      this.state.lastSightingTurn = this.state.turn
       this.state.combatPending = true
       this.L('search', `航空索敌: 发现德军在 ${adjacentLabel}!`)
     } else {
@@ -387,7 +391,7 @@ export class BismarckGame {
     // 信号泄露：记录暴露位置 + 激活所有英军战舰
     if (result.positionRevealed) {
       const pos = this.state.germanPositions.get(shipId)
-      if (pos) this.state.transportRevealedHex = hexToLabel(pos)
+      if (pos) { this.state.transportRevealedHex = hexToLabel(pos); this.state.lastSightingHex = hexToLabel(pos); this.state.lastSightingTurn = this.state.turn }
       this.state.bismarckFound = true  // 英军获知德军位置，所有战舰解锁
     }
 

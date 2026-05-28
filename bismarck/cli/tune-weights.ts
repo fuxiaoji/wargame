@@ -3,6 +3,9 @@
 
 import { BismarckEnv } from '../engine/env'
 import { createStateMachineAI, DEFAULT_WEIGHTS, Weights } from './state-machine'
+import { GERMAN_START_HEXES } from '../engine/map'
+import { BRITISH_FIXED_POSITIONS } from '../engine/setup'
+import { getGermanReachableLabels } from '../engine/movement'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -86,25 +89,41 @@ function runOneGame(gerW: Weights, britW: Weights): { winner: string; gerStrateg
     let result: { actionId: number | null; rawResponse: string }
 
     if (obs.phase === 'setup-british') {
-      result = bi.selectBritish(obs)
-      const raw = result.rawResponse
-      const dh = ['E5','E3','D5','C7','B6','F6','F5','F3','F2','E1','D1','C1']
-      for (const sh of env.game.state.britishShips)
-        if (sh.def.isDummy && !env.game.state.britishPositions.has(sh.def.id))
-          env.game.placeBritishToken(sh.def.id, dh[Math.floor(Math.random()*dh.length)])
-      const re = /\(([^,)]+),\s*([A-F]\d)\)/g; let m
-      while ((m = re.exec(raw)) !== null) {
-        const sh = env.game.state.britishShips.find(x => !x.def.isDummy && !env.game.state.britishPositions.has(x.def.id) &&
-          (x.def.name===m![1].trim() || x.def.name.includes(m![1].trim()) || m![1].trim().includes(x.def.name.slice(0,2))))
-        if (sh) env.game.placeBritishToken(sh.def.id, m[2])
+      const s = env.game.state
+      // 1. 固定位置舰船先放
+      const used = new Set<string>(GERMAN_START_HEXES)
+      for (const [hex, shipIds] of Object.entries(BRITISH_FIXED_POSITIONS)) {
+        used.add(hex)
+        for (const id of shipIds) env.game.placeBritishToken(id, hex)
       }
-      const left = env.game.state.britishShips.filter(x => !env.game.state.britishPositions.has(x.def.id))
-      if (left.length > 0) {
-        const hs = ['E7','E6','E5','E3','E2','E1','D7','D5','D1','C7','C1','B6','F6','F5','F3','F2']
-        for (const sh of left) env.game.placeBritishToken(sh.def.id, hs[Math.floor(Math.random()*hs.length)])
+      // 2. 德军速2可达格 (使用游戏引擎自带函数)
+      const dummyShip = { def: { speed: 2 }, steps: 2 } as any
+      const reachable = new Set<string>()
+      for (const label of GERMAN_START_HEXES) {
+        const h = { q: label.charCodeAt(0) - 65, r: parseInt(label.slice(1)) }
+        if (h.q < 0 || h.q >= 6 || h.r < 1 || h.r > 8) continue
+        for (const l of getGermanReachableLabels(dummyShip, h)) {
+          if (!used.has(l)) reachable.add(l)
+        }
       }
-      env.game.finishSetup()
-      steps++; continue
+      // 3. 自由舰船放可达格，真船先、伪装后，每格一艘
+      const placeFree = (isDummy: boolean) => {
+        for (const sh of s.britishShips) {
+          if (sh.def.isDummy !== isDummy || s.britishPositions.has(sh.def.id)) continue
+          const avail = [...reachable].filter(h => !used.has(h))
+          if (avail.length > 0) {
+            const picked = avail[Math.floor(Math.random() * avail.length)]
+            env.game.placeBritishToken(sh.def.id, picked); used.add(picked)
+          }
+        }
+      }
+      placeFree(false); placeFree(true)
+      // 4. 放不完的fallback (不含陆地E6/D7)
+      const fallback = ['E7','E5','E3','E2','E1','D8','D5','D4','D3','D2','D1','C7','C1','B6','F6','F5','F3','F2','A3','A4','B4']
+      for (const sh of s.britishShips)
+        if (!s.britishPositions.has(sh.def.id))
+          env.game.placeBritishToken(sh.def.id, fallback[Math.floor(Math.random()*fallback.length)])
+      env.game.finishSetup(); steps++; continue
     }
 
     result = obs.activePlayer === 'german' ? ai.selectGerman(obs) : bi.selectBritish(obs)

@@ -59,23 +59,26 @@ export function SpineToken({
     if (!asset) return
 
     const res = Math.round(CANVAS_RES * tokenScale)
-    const char = new SpineCharacter(asset, res, res)
-    charRef.current = char
+    try {
+      const char = new SpineCharacter(asset, res, res)
+      charRef.current = char
 
-    const canvas = char.getCanvas()
-    canvas.style.width = '100%'
-    canvas.style.height = '100%'
+      const canvas = char.getCanvas()
+      if (!canvas) return
+      canvas.style.width = '100%'
+      canvas.style.height = '100%'
 
-    if (containerRef.current) {
-      containerRef.current.innerHTML = ''
-      containerRef.current.appendChild(canvas)
-    }
+      if (containerRef.current) {
+        containerRef.current.innerHTML = ''
+        containerRef.current.appendChild(canvas)
+      }
 
-    char.start()
-
-    return () => {
-      char.destroy()
-      charRef.current = null
+      return () => {
+        char.destroy()
+        charRef.current = null
+      }
+    } catch (e) {
+      console.warn('[SpineToken] create failed:', e)
     }
   }, [shipId])
 

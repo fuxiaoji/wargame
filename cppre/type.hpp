@@ -98,6 +98,8 @@ struct GameState {
 
     // 本回合德军位置是否公开 (伪装鉴定失败后)
     bool germanPositionPublic;
+    std::string lastSightingHex;  // 英军最后一次同格/战斗发现俾斯麦的格
+    int lastSightingTurn = 0;     // 上次目击发生的回合号 (检测刷新)
 
     // 伪装鉴定失败需要跟随德军的伪装算子 ID
     std::unordered_set<std::string> failedDummies;

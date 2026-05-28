@@ -206,7 +206,7 @@ function collectTokens(gameState: GameState, showGermanPositions: boolean): Toke
     }
   }
   addShips(gameState.britishShips, gameState.britishPositions, showGermanPositions)
-  if (showGermanPositions || gameState.germanPositionPublic) {
+  if (showGermanPositions) {
     addShips(gameState.germanShips, gameState.germanPositions, false)
   }
   return tokens
@@ -300,7 +300,16 @@ export function HexMap({
           const size = CHIBI_SIZE * tokenScale * zoom
           const ox = (t.stackIdx - (t.stackTotal - 1) / 2) * 8 * tokenScale * zoom
           const oy = -t.stackIdx * 5 * tokenScale * zoom
-          return <img key={`chibi-${t.shipId}-${idx}`} src={`/spine/${t.shipId}/chibi.png`} alt={ship.def.name}
+          const labelY = t.py * zoom + oy - size * 0.7 - 12 * tokenScale * zoom
+          return <span key={`chibi-${t.shipId}-${idx}`}>
+            <span style={{
+              position: 'absolute', left: t.px * zoom + ox - 30, top: labelY,
+              width: 60, textAlign: 'center', pointerEvents: 'none',
+              zIndex: 10 + t.stackIdx, fontSize: `${Math.round(9 * tokenScale * zoom)}px`,
+              color: ship.def.side === 'german' ? '#f87171' : '#60a5fa',
+              fontWeight: 'bold', textShadow: '0 1px 2px black',
+            }}>{ship.def.name}</span>
+            <img src={`/spine/${t.shipId}/chibi.png`} alt={ship.def.name}
             style={{
               position: 'absolute',
               left: t.px * zoom + ox - size / 2,
@@ -311,7 +320,7 @@ export function HexMap({
               opacity: t.isDummy ? 0.75 : 1,
             }}
             onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
-          />
+          /></span>
         })}
       </div>
     </div>

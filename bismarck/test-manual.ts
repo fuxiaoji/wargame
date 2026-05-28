@@ -1,7 +1,7 @@
 import { BismarckEnv, GameAction, GameObservation } from './engine/env'
 import * as readline from 'readline'
 
-const KEY = 'sk-cfd4012560484e49bfca9c02cda7277d'
+const KEY = process.env.DEEPSEEK_API_KEY || ''
 const MODEL = 'deepseek-chat'
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout })

@@ -58,6 +58,8 @@ export function createGameState(_rng?: Randomizer): GameState {
     transportPending: false,
 
     germanPositionPublic: false,
+    lastSightingHex: null,
+    lastSightingTurn: 0,
     failedDummies: new Set(),
     transportRevealedHex: null,
     airSearchDone: false,
