@@ -1,266 +1,131 @@
-# Agent 架构与张量规范 (双 C++/TS 兼容)
+# DeepLearn Agent: RL Tensor v3
 
-## 0. 项目总览 (2026-05-23)
+## 项目定位
 
-```
-击沉俾斯麦号 (Sink the Bismarck) — 双盲兵棋推演 AI 研究平台
+`deeplearn/` 是《击沉俾斯麦号》AI 研究管线。当前论文路线采用递进消融：
 
-bismarck/          TS 引擎 + React GUI (npm run dev)
-cppre/             C++ 引擎 (g++ -std=c++20)
-deeplearn/         深度学习训练管线
-  agent.md         张量规范 + 架构文档 (本文件)
-  todo.md          训练实施 5 阶段计划
-  read_log.py      张量→人类可读日志
-  global_log.py    张量→双视角全局日志 (德军看到 vs 英军看到)
-  data/            训练数据目录
-    human-vs-ai/    前端人vsAI 自动保存
-    ai-vs-ai/       CLI/服务器 批量对战
-    random/         随机对战
-
-CLI 对战:  npx tsx battle-llm.ts [low|high|vs] [局数]
-数据服务:  npm run server  (接收前端数据 + 批量训练管理)
-全局日志:  python3 deeplearn/global_log.py data/human-vs-ai/game-xxx
+```text
+状态机 AI baseline
+→ 朴素 RL baseline
+→ Transformer RL
+→ Belief/Intent/Utility 论文新架构
 ```
 
-## 1. 输入张量: `[73, 128, 8, 6]`
+当前只实现 Stage 1：朴素 RL baseline。数据格式必须一次性对齐最终标准，后续 Transformer 与论文新架构复用同一批高质量数据。
 
-### 1.1 维度
+## 数据政策
 
-| 轴 | 大小 | 含义 |
-|---|---|---|
-| Time | 73 | 18回合×4阶段 + 1部署 = 73 步 |
-| Channel | 128 | 见下方 5 个 Block |
-| Height | 8 | 行 1-8 (A-F 列从上到下) |
-| Width | 6 | 列 A-F (q=0..5) |
+旧 bug 环境数据不再进入训练链路，已归档到：
 
-### 1.2 128 通道分配
-
-#### Block 1: 静态地理与全局态势 (Ch 0-15, 双方可见)
-```
-Ch 0: Navigable_Mask    可通行海域=1, 陆地=0
-Ch 1: Convoy_Routes     运输航路格=1 (D2,D3,C4,C3,D5,E1,E4,E5)
-Ch 2: Brest_Target      F7=1, 其余=0
-Ch 3: German_Spawns     起始格 A5,A6,B7=1
-Ch 4: Phase_GerMove     德军移动阶段=1
-Ch 5: Phase_BritMove    英军移动阶段=1
-Ch 6: Phase_BritSearch  索敌阶段=1
-Ch 7: Phase_Combat      战斗/运输阶段=1
-Ch 8: Turn_Progress     当前回合/18.0 (铺满全图)
-Ch 9: VP_British        英军VP/6.0 (铺满)
-Ch10: VP_German         德军VP/6.0 (铺满)
-Ch11-15: Reserved       预留: 距离场等
+```text
+deeplearn/data/archive_buggy/
 ```
 
-#### Block 2: 英军实体 (Ch 16-47, 德军视角清零)
-```
-每船 4 通道 [位置(0/1), HP_norm, Atk_norm, Locked(1=禁步)]
-Ch16-19: Hood          胡德号
-Ch20-23: PrinceOfWales 威尔士亲王号
-Ch24-27: ArkRoyal      皇家方舟号
-Ch28-31: Generic_2Step 其他 2-Step 舰聚合
-Ch32-35: Generic_1Step 其他 1-Step 舰聚合
-Ch36-39: Dummy         伪装算子 (位置=1, HP=1, 攻=0, 移=3)
-Ch40:    Brit_Anon_Pos 专供德军: 叠加所有背面算子位置
-Ch41-47: Reserved
+`training_v9`、`training_v10`、`training_v11` 只作为状态机分析材料，不作为 RL 训练数据。新数据统一写入：
+
+```text
+deeplearn/data/rl_tensor_v3/
 ```
 
-#### Block 3: 德军实体 (Ch 48-63, 英军视角清零)
-```
-每船 4 通道 [位置, HP, 攻, 移动力]
-Ch48-51: Bismarck
-Ch52-55: PrinzEugen
-Ch56-63: Reserved
-```
+## RL Tensor v3 文件
 
-#### Block 4: 战场事件与遗迹 (Ch 64-95)
-```
-Ch64: Event_CombatReveal  同格索敌暴露坐标=1
-Ch65: Event_RadarReveal   航空侦察发现坐标=1
-Ch66: Event_ConvoyReveal  运输信号泄露坐标=1
-Ch67: Event_DummyKill     伪装鉴定移除坐标=1
-Ch68: Fog_Cleared         索敌未发现格=1
-Ch69-79: Ger_Pheromone    德军历史轨迹衰减 (t-1=1.0, t-2=0.8, ...)
-Ch80-95: Reserved
-```
+每局一个目录：
 
-#### Block 5: 认知草稿区 (Ch 96-127, 网络内部使用)
-```
-Ch96:  Belief_State_B  预测俾斯麦位置概率 (仅英军)
-Ch97:  Intent_State_Pi 预测敌方行动概率
-Ch98-127: Hidden_Context Transformer隐状态映射预留
-```
-
----
-
-## 2. 不对称掩码逻辑
-
-### 2.1 英军视角 O_brit
-```
-O_brit = S_global.copy()
-O_brit[:, 48:64] = 0.0   # 掩盖德军实体 (Block 3)
-O_brit[:, 69:80] = 0.0   # 掩盖德军历史轨迹 (除非暴露)
-```
-
-### 2.2 德军视角 O_ger
-```
-O_ger = S_global.copy()
-O_ger[:, 16:40] = 0.0    # 掩盖英军身份 (Block 2 中 16-39)
-                         # Ch40 Brit_Anon_Pos 保留 (匿名位置)
-O_ger[:, 96:98] = 0.0    # 掩盖英军认知预测
-```
-
----
-
-## 3. 中间预测张量 (B 和 Π)
-
-### 3.1 B — 位置信念矩阵
-```
-Shape: [8, 6], float32, 每个格 ∈ [0,1]
-含义: 英军预测俾斯麦在当前格的概率
-Label: 上帝视角真实位置 (one-hot)
-Loss: CrossEntropy(B, true_pos)
-```
-
-### 3.2 Π — 敌方意图矩阵
-```
-Shape: [8, 6], float32, 每个格 ∈ [0,1]
-含义: 预测敌方下一步移动到各格的概率
-Label: 敌方下一步真实移动落点
-Loss: CrossEntropy(Π, true_action_grid)
-```
-
----
-
-## 4. 输出动作张量
-
-### 4.1 德军动作 50 维
-```
-[0:48]  Move_Target_Logits  移动目标格 (6×8 展平)
-        Softmax + Mobility_Mask(BFS可达格置0,其余-1e9)
-[48:50] Transport_Decision   [不攻击, 攻击]
-
-仅在 transport_attack 阶段激活 [48:50]
-```
-
-### 4.2 英军动作 528 维
-```
-10 个编队 × 48 维移动落点 = 480 维
-  [0:48]    胡德号
-  [48:96]   威尔士亲王号
-  [96:144]  皇家方舟号
-  [144:336] 其他战舰×4组
-  [336:480] 伪装算子×4组
-
-[480:528]  航空索敌目标 (48维)
-  仅在搜索阶段激活。Radar_Mask(邻格=0,其余-1e9)
-```
-
-### 4.3 非法动作掩码生成 (Engine)
-```
-Mobility_Mask(ship, from):
-  可达 = BFS(from, speed) ∪ {from(不动)}
-  掩码: 可达格→0, 其余→-1e9
-
-Lock_Mask(ship):
-  发现俾斯麦前被锁定的船: 仅当前格=0, 其余=-1e9
-```
-
----
-
-## 5. 二进制张量日志格式
-
-### 5.1 文件结构
-```
+```text
 game_000001/
-  state.bin    [73, 128, 8, 6] float32 LE  (约 1.8 MB)
-  action.bin   变长记录
-  result.json  {"winner":"british","vp_german":2,"vp_british":0,"turns":18}
+  state.bin    [73,128,8,6] float32 LE, 20-byte BSMB header
+  mask.bin     [73,16,128] uint8
+  action.bin   [73,16,8] uint8 fixed records
+  target.bin   [73,10] float32 LE, RLT3 header
+  result.json  metadata
 ```
 
-### 5.2 state.bin 格式
-```
-Offset  Size    Content
-0       4       magic: 0x42534D42 ("BSMB")
-4       4       time_steps (73)
-8       4       channels (128)
-12      4       height (8)
-16      4       width (6)
-20      N       数据: time × chan × row × col, float32 LE, C-order
-```
-总大小 = 20 + 73 × 128 × 8 × 6 × 4 = 1,794,068 字节
+v3 时间轴是阶段级：`0=初设`，18 回合每回合 4 槽。阶段内逐船动作写入 16 个 unit slot，所以状态机逐船决策不会挤占 73 个阶段槽。
 
-### 5.3 action.bin 格式 (每步记录)
-```
-step_index:   uint8   (0-72)
-phase:        uint8   (0-7)
-side:         uint8   (0=german, 1=british)
-action_count: uint8   本步动作数量
-action_type:  uint8   (0=move, 1=finish, 2=air_search, 3=combat, 4=transport)
-ship_id:      uint8   (船舶编号, 无则为0)
-target_q:     int8    (目标列 0-5, 无则为-1)
-target_r:     int8    (目标行 1-8, 无则为-1)
-每步 8 字节定长
-```
+## 128 通道分配
 
-### 5.4 result.json
-```json
-{
-  "game_id": "game_000001",
-  "winner": "british",
-  "vp_german": 2,
-  "vp_british": 0,
-  "turns": 18,
-  "bismarck_sunk": false,
-  "brest_reached": false,
-  "total_steps": 312,
-  "seed": 42
-}
+| 范围 | 内容 |
+|---|---|
+| 0-15 | 地图、阶段、回合、VP、当前行动方、公开状态 |
+| 16-47 | 英军状态；德军视角隐藏未揭示身份 |
+| 48-63 | 德军状态；英军视角隐藏未公开位置 |
+| 64-79 | 索敌、航空、运输泄露、伪装、历史线索 |
+| 80-95 | 当前行动单位与合法动作上下文 |
+| 96-111 | F7、航路、危险、覆盖、收益等规则先验 |
+| 112-127 | Belief/Intent/Utility 与论文新架构预留 |
+
+训练输入只能读取 `state.bin` 与 `mask.bin`。`target.bin` 中允许保存上帝视角真相，只用于监督标签和评估。
+
+## 动作空间
+
+逐单位 128 动作：
+
+```text
+0-47   移动目标格
+48-95  航空索敌目标格
+96     finish-phase
+97     combat
+98     transport-attack
+99-127 保留
 ```
 
----
+所有训练都必须用 `mask.bin[t,slot]` 屏蔽非法动作，mask 全零的 slot 不参与 loss。
 
-## 6. 引擎侧实现接口
+## 当前生成入口
 
-### 6.1 C++ (cppre/tensor_logger.hpp)
-```cpp
-// 在每个时间步填充当前切片
-void fillStateSlice(float* slice_128x8x6, const GameState& state, ShipSide viewer);
-
-// 写入整局日志
-void writeGameLog(const std::string& dir,
-    const std::vector<float>& state_tensor,    // [73*128*8*6]
-    const std::vector<uint8_t>& action_records, // 73*8 bytes
-    const GameResult& result);
+```bash
+npx tsx bismarck/cli/generate-rl-tensor-v3.ts \
+  --games 100000 \
+  --out deeplearn/data/rl_tensor_v3/raw \
+  --progress-every-sec 10
 ```
 
-### 6.2 TS (bismarck/engine/tensor.ts)
-```typescript
-// 同接口，TypeScript 实现
-function fillStateSlice(state: GameState, viewer: ShipSide): Float32Array  // [128*8*6]
-function writeGameLog(dir: string, stateTensor: Float32Array, actions: Uint8Array, result: any): void
+长时间数据生成必须保留命令行进度：生成器会输出完成局数、百分比、速度、ETA、胜负计数和截断计数。正式 10万-20万局生成前先跑小样本和 1,000 局试生产。
+
+默认 policy mix:
+
+| 来源 | 比例 |
+|---|---:|
+| V11 状态机强者互打 | 35% |
+| 状态机 vs 严父 | 25% |
+| 状态机 vs 乱打 | 15% |
+| 默认/弱状态机混合 | 10% |
+| 随机扰动状态机权重 | 10% |
+| 高质量局 fallback | 5% |
+
+## 训练阶段
+
+### Stage 1: 朴素 RL baseline
+
+```text
+state[t] [128,8,6]
+→ CNN
+→ MLP
+→ policy[128] + value
 ```
 
-### 6.3 Python (deeplearn/tensor.py)
-```python
-def read_state_tensor(path: str) -> np.ndarray   # [73, 128, 8, 6]
-def read_action_log(path: str) -> list[dict]      # 步骤列表
-def apply_mask(state: np.ndarray, side: str) -> np.ndarray  # 不对称掩码
+先行为克隆新数据，再 PPO 微调。验收标准是超过乱打，接近普通状态机，并暴露无长期记忆的缺陷。
+
+当前训练入口：
+
+```bash
+python3 deeplearn/train_rl_baseline.py \
+  --data deeplearn/data/rl_tensor_v3/raw \
+  --out deeplearn/checkpoints/rl_baseline_stage1.pt
 ```
 
----
+脚本会显示 batch/epoch 进度。当前仓库环境未内置 PyTorch，运行训练前需安装 `torch`。
 
-## 7. 训练数据生成流水线
+### Stage 2: Transformer RL
 
+复用 v3 数据，引入历史窗口：
+
+```text
+state[t-k:t] → CNN encoder → Transformer → policy/value
 ```
-C++ 引擎 (高速) / TS 引擎 (可复现)
-    │
-    ▼ 每局输出 state.bin + action.bin + result.json
-    │
-data/random/     (10万局随机)
-data/heuristic/  (10万局启发式)
-data/selfplay/   (RL训练中自对弈)
-    │
-    ▼ PyTorch DataLoader
-    │
-预训练 (Phase 2) → RL微调 (Phase 4)
-```
+
+目标是证明历史序列对双盲追踪有效。
+
+### Stage 3: 论文新架构
+
+加入 Belief、Intent、Utility/EUA 模块与可解释热力图输出。目标是超过 Transformer RL，并给出可解释的中间预测证据。

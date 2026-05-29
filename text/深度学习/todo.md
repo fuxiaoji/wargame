@@ -1,81 +1,65 @@
-# 训练实施计划
+# 深度学习当前任务清单
 
-## 当前状态
+## 当前阶段
 
-```
-已完成:
-  bismarck/        TS 引擎 ✅  (GUI 可玩)
-  cppre/           C++ 引擎 ✅  (每秒千局)
-  游戏规则验证      ✅  (双引擎一致)
-
-待完成:
-  deeplearn/       训练框架      ← 当前阶段
+```text
+Stage 1: 朴素 RL baseline
 ```
 
-## Phase 1: 环境张量化 (预计 1 周)
+目标：用最终标准 `RL Tensor v3` 重新生成高质量数据，先完成 CNN+MLP 的行为克隆与 PPO baseline。
 
-### 1.1 张量日志格式
-- [ ] 定义二进制格式: `state.bin` = `[73, 128, 8, 6]` float32 LE
-- [ ] 定义动作记录格式: `action.bin` = 每步记录 (step_index, action_type, action_data)
-- [ ] 定义元数据: `result.json` = {winner, vp_german, vp_british, turns}
+## 已完成
 
-### 1.2 C++ 引擎输出张量
-- [ ] 在 `cppre/` 写 `tensor_logger.hpp` —— 填充 128 通道 + 写二进制
-- [ ] 修改 `main.cpp` 输出 `.bin` 文件而非文本日志
+- [x] 明确四阶段论文路线：状态机 → 朴素 RL → Transformer RL → 新架构
+- [x] 旧 bug 数据归档到 `deeplearn/data/archive_buggy/`
+- [x] 设计最终 128 通道 `RL Tensor v3`
+- [x] 实现 v3 张量导出器：`bismarck/engine/tensor-v3.ts`
+- [x] 实现数据生成 CLI：`bismarck/cli/generate-rl-tensor-v3.ts`
+- [x] 小样本生成验证：`state/mask/action/target/result` 文件形状正确
 
-### 1.3 Python 环境适配
-- [ ] `deeplearn/env.py` —— 封装 C++ 引擎（pybind11 或 subprocess）
-- [ ] `deeplearn/tensor.py` —— 读取/写入/可视化张量
-- [ ] 实现 `reset() → state_tensor`, `step(action) → (state_tensor, reward, done)`
+## 接下来
 
-## Phase 2: 预训练数据生成 (预计 1 周)
+### 数据生成
 
-### 2.1 启发式 Bot
-- [ ] 德军 Bot: 4 种策略 (冲港/抓落单/航路攒VP/深海躲避)，状态机切换
-- [ ] 英军 Bot: 展开搜索 → 发现后围堵
+- [x] 运行 20 局 v3 试生产，检查格式、胜负比例、截断比例、胜利类型
+- [x] 为长时间生成加入换行进度日志：局数、速度、ETA、胜负、截断
+- [x] 修正 73 时间轴语义：阶段级时间槽 + 阶段内 16 个单位动作槽
+- [x] 重新生成 5 局阶段级 raw 小样本并通过校验，`truncated=0`
+- [x] 运行 1,000 局试生产，检查胜负比例、截断比例、奖励分布和来源覆盖
+- [ ] 修正 policy mix，使任一方胜率不超过 75%
+- [ ] 生成 10万-20万局正式 `rl_tensor_v3/raw`
+- [ ] 按胜利类型分桶：F7、6VP、击沉、18回合
 
-### 2.2 数据生成
-- [ ] 10 万局随机对弈 → `data/random/`
-- [ ] 10 万局启发式对弈 → `data/heuristic/`
-- [ ] 每局输出: `state.bin` + `action.bin` + `result.json`
+### 数据校验
 
-## Phase 3: 模型搭建与监督预训练 (预计 2 周)
+- [x] 写 `deeplearn/check_rl_tensor_v3.py`
+- [x] 检查 `state=[73,128,8,6]`
+- [x] 检查 `mask=[73,16,128]`
+- [x] 检查 `action_index` 一定在合法 mask 内
+- [x] 检查英军观测不泄露隐藏德军位置
+- [x] 检查德军观测不泄露未揭示英军身份
+- [x] 修复德军视角 Ark Royal 航空覆盖泄露风险
 
-### 3.1 模型架构 (PyTorch)
-```
-state [B,73,128,8,6]
-  → CNN (空间压缩, 128→256维)
-  → Transformer Encoder (时序, 2-4层)
-  → 预测头 B: [8,6] softmax (位置信念)
-  → 预测头 Π: [8,6] softmax (敌方意图)
-  → EUA 层 (博弈注意力)
-  → Actor 头 (动作概率) + Critic 头 (胜率)
-```
+### Stage 1 模型
 
-### 3.2 第一阶段监督训练
-- [ ] 冻结 EUA + Actor + Critic (只训 CNN + Transformer + 预测头)
-- [ ] Loss: `CE(B, true_pos) + CE(Π, true_action)`
-- [ ] 用 Phase 2 的数据，训练到 B 预测准确率 > 80%
+- [x] 写 `deeplearn/train_rl_baseline.py`
+- [x] 实现 CNN+MLP policy/value 网络
+- [x] 行为克隆预训练入口
+- [x] value head 预训练入口
+- [ ] 安装/固定 PyTorch 依赖并跑完整训练
+- [ ] PPO 在线微调
 
-### 3.3 第二阶段 EUA 接入
-- [ ] 解冻 EUA，冻结 CNN + Transformer (或极小学习率微调)
-- [ ] 用预计算的 U 矩阵（战斗期望收益表）
+### 评估
 
-## Phase 4: 强化学习微调 (预计 3 周)
+- [ ] 对乱打 AI
+- [ ] 对默认状态机
+- [ ] 对 V11 状态机
+- [ ] 对严父 AI
+- [ ] 保存 Stage 1 报告到 `test_results/`
 
-### 4.1 PPO 训练
-- [ ] 全模型解冻，Self-Play
-- [ ] 复合 Loss: `L_actor + 0.5*L_critic + 1.0*L_belief - 0.01*H_entropy`
-- [ ] RTX 4060 预估: 50 万局 Self-Play
+## 暂不做
 
-### 4.2 Baselines
-- [ ] RNN-PPO (LSTM 替代 Transformer)
-- [ ] PPO 无 EUA (MLP 替代)
-- [ ] PPO 无辅助监督 (去掉 L_belief)
-
-## Phase 5: 实验与论文 (预计 3 周)
-
-- [ ] 胜率对比表格
-- [ ] 位置预测热力图可视化
-- [ ] 消融实验 (ablation)
-- [ ] LaTeX 论文初稿
+- [ ] Transformer RL
+- [ ] Belief/Intent/Utility 新架构
+- [ ] EUA 层
+- [ ] 百万局重训练

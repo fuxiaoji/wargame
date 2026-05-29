@@ -2,94 +2,143 @@
 
 ## 项目概述
 
-击沉俾斯麦号 (Sink the Bismarck) — 双盲兵棋推演 AI 研究平台。
+《击沉俾斯麦号》是一个双盲兵棋推演 AI 研究平台。工程目标不是只做一个可玩游戏，而是形成完整 AI 研究链路：
 
-1941 年北大西洋，德军俾斯麦号突破英军封锁驶向布雷斯特港。一方扮演德军（隐藏移动），一方扮演英军（索敌围堵）。
+```text
+状态机 AI baseline
+→ 朴素 RL baseline
+→ Transformer RL
+→ Belief/Intent/Utility 论文新架构
+```
+
+当前实现阶段：**Stage 1 朴素 RL baseline**。
 
 ## 项目结构
 
-```
+```text
 wargame/
-├── bismarck/               TS 引擎 + React GUI (主战场)
-│   ├── engine/            游戏核心引擎
-│   │   ├── game.ts        游戏主逻辑 (状态机、移动、索敌、战斗)
-│   │   ├── env.ts         环境包装器 (getActions/step/getObservation)
-│   │   ├── types.ts       类型定义 (GameState, ShipState, Phase...)
-│   │   ├── setup.ts       初始化 (createGameState, 英军固定位置)
-│   │   ├── map.ts         六角格坐标系统
-│   │   ├── movement.ts    移动规则 + BFS 可达格
-│   │   ├── search.ts      索敌逻辑 (同格索敌、航空索敌、伪装鉴定)
-│   │   ├── combat.ts      战斗结算
-│   │   ├── transport.ts   运输攻击
-│   │   ├── victory.ts     胜利条件判定
-│   │   └── units.ts       舰船定义 (ShipDef, 属性常量)
-│   ├── cli/               CLI 工具 + AI
-│   │   ├── state-machine.ts  状态机 AI (BritishBrain / GermanBrain)
-│   │   ├── tune-weights.ts   权重调优
-│   │   ├── cross-eval.ts     交叉评估
-│   │   ├── eval-v3.ts        V3 评估
-│   │   └── presets.ts        预设权重
-│   ├── ui/                React 前端 (GUI)
-│   └── src/               Vite 入口
-├── cppre/                  C++ 引擎 (高速训练用, ~1000局/秒)
-│   ├── game.hpp           游戏主逻辑 (与 TS 引擎功能对等)
-│   ├── env.hpp            环境包装器
-│   ├── state_machine.hpp  状态机 AI (C++ 实现)
-│   ├── tournament.cpp     多线程锦标赛
-│   ├── bridge.cpp         TS↔C++ 桥接
-│   └── (其他 .hpp 与 TS engine/ 一一对应)
-├── deeplearn/              深度学习训练管线
-│   ├── agent.md           张量规范 + 架构文档 (73×128×8×6)
-│   ├── visualize_evo.py   演化可视化
-│   ├── global_log.py      全局日志 (德军 vs 英军双视角)
-│   └── data/              训练数据 (已 gitignore, ~7GB)
-├── text/                   文档 (按主题分类)
-│   ├── 游戏引擎/          规则.md, PLAN.md, api.md
-│   ├── llmai/             lowai.md
-│   ├── 状态机ai/          状态机训练.md, 状态机个体README.md
-│   └── 深度学习/          ideal.md, tensor.md, training.md, todo.md, v3_*
-├── agent.md               本文件 — 项目架构与工作流
-├── todo.md                当前任务清单
-├── bug.md                 已修复 Bug 记录
-└── .gitignore             忽略规则 (node_modules, 训练数据, API密钥, 编译产物)
+├── bismarck/               TypeScript 引擎 + React GUI
+│   ├── engine/             游戏规则、环境、张量导出
+│   ├── cli/                状态机、评估、RL 数据生成
+│   ├── src/                React 入口
+│   └── ui/                 前端组件
+├── cppre/                  C++ 高速训练/锦标赛引擎
+├── deeplearn/              深度学习数据与训练管线
+│   ├── agent.md            RL Tensor v3 说明
+│   ├── read_log.py         张量日志读取
+│   ├── global_log.py       双视角日志
+│   └── data/
+│       ├── archive_buggy/  旧 bug 数据归档，不进入训练
+│       ├── training_v9..   状态机分析材料
+│       └── rl_tensor_v3/   新 RL 数据
+└── text/                   设计文档、报告、参考文献
 ```
 
 ## 双引擎架构
 
-| | TS 引擎 (bismarck/) | C++ 引擎 (cppre/) |
+| | TS 引擎 | C++ 引擎 |
 |---|---|---|
-| 用途 | GUI + 开发验证 | 批量训练 (1000局/秒) |
-| 语言 | TypeScript | C++17/20 |
-| 规则 | 完整实现 | 与 TS 功能对等 |
-| 启动 | `npm run dev` | `g++ -O3 -std=c++20 tournament.cpp -o tournament` |
+| 位置 | `bismarck/` | `cppre/` |
+| 用途 | GUI、调试、RL v3 数据生成 | 高速锦标赛、状态机训练 |
+| 要求 | 规则必须保持一致 | 规则必须保持一致 |
 
-**重要**: 修改游戏规则时必须同步更新两个引擎，保持行为一致。
+修改游戏规则时必须同步两边，否则训练数据和前端行为会分裂。
+
+## 当前 AI 路线
+
+### Stage 0: 状态机基线
+
+状态机 AI 是当前最成熟 baseline：
+
+- V11 状态机强者
+- 严父 AI
+- 默认状态机
+- 乱打 AI
+
+这些 AI 用于评估池和 RL 数据生成。
+
+### Stage 1: 朴素 RL baseline
+
+当前阶段只做：
+
+```text
+state[t] [128,8,6]
+→ CNN
+→ MLP
+→ policy[128] + value
+```
+
+不做 Transformer，不做 EUA。目标是先得到可信 RL baseline。
+
+### Stage 2-3: 后续论文架构
+
+Stage 2 引入 Transformer 历史窗口。
+Stage 3 引入 Belief、Intent、Utility/EUA 可解释模块。
+
+## RL Tensor v3
+
+最终标准数据格式：
+
+```text
+state.bin    [73,128,8,6]
+mask.bin     [73,16,128]
+action.bin   [73,16,8]
+target.bin   [73,10]
+result.json
+```
+
+73 是阶段级时间轴：初设 1 槽 + 18 回合 × 4 阶段。阶段内逐船动作写入 16 个 unit slot。
+
+生成入口：
+
+```bash
+npx tsx bismarck/cli/generate-rl-tensor-v3.ts \
+  --games 100000 \
+  --out deeplearn/data/rl_tensor_v3/raw \
+  --progress-every-sec 10
+```
+
+长时间生成或训练必须使用可见进度输出。`generate-rl-tensor-v3.ts` 会按固定间隔打印完成局数、速度、ETA、胜负与截断统计。
+
+旧 bug 数据已归档到 `deeplearn/data/archive_buggy/`，不得用于训练。
 
 ## 工作流
 
-### 开始任何任务前
-1. 读取 `todo.md` 了解当前任务
-2. 读取 `bug.md` 了解已修复的 Bug，避免重蹈覆辙
-3. 阅读 `text/` 下相关文档理解背景
+开始任务前：
 
-### 修改游戏规则时
-1. 先改 TS 引擎验证逻辑正确性 (`bismarck/engine/`)
-2. 同步改 C++ 引擎 (`cppre/`)
-3. 运行测试确认双引擎行为一致
+1. 阅读 `todo.md`
+2. 阅读 `bug.md` 与 `deeplearn/bug.md`
+3. 阅读相关 `text/` 设计文档
 
-### 修改 AI 时
-- 状态机 AI: `bismarck/cli/state-machine.ts` + `cppre/state_machine.hpp`
-- LLM AI: `bismarck/battle-llm.ts`
-- 深度学习: `deeplearn/agent.md` (张量规范)
+修改 AI 前：
 
-### 提交前
-- 确认 `.gitignore` 已排除 API 密钥、训练数据、编译产物
-- 不要提交 `text/游戏引擎/api.md` (含 API 密钥)
+1. 查论文和成熟方案
+2. 更新 `text/参考文献.md`
+3. 写计划文档
+4. 保留 baseline 和对比验证
 
-## 快速命令
+提交前：
+
+1. 不提交 API 密钥
+2. 不提交无说明的大型训练产物
+3. 数据格式、奖励函数、动作空间变更必须同步文档
+
+## 常用命令
 
 ```bash
-npm run dev          # 启动 GUI
-npm run battle       # 单局 AI 对战
-npx tsx bismarck/cli/state-machine.ts  # 状态机对战
+# 前端
+cd bismarck && npm run dev
+
+# 状态机评估
+npx tsx bismarck/cli/rank-state-machines.ts 6
+
+# 生成 RL Tensor v3 小样本
+npx tsx bismarck/cli/generate-rl-tensor-v3.ts --games 10 --out /tmp/rl_tensor_v3 --progress-every-sec 5
+
+# Stage 1 朴素 RL 行为克隆
+python3 deeplearn/train_rl_baseline.py --data deeplearn/data/rl_tensor_v3/raw --out deeplearn/checkpoints/rl_baseline_stage1.pt
+
+# C++ 锦标赛
+cd cppre && g++ -std=c++20 -O3 tournament.cpp -o tournament
+./tournament 10 20 50 10 ../deeplearn/data/training_v11
 ```

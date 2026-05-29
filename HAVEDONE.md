@@ -87,6 +87,33 @@
   - 仅正值无效（37-39%）
 - [x] 结论：bolt-on 效果有限，需要 V5 训练时原生支持
 
+### 2026-05-29：RL Tensor v3 & Stage 1 朴素 RL
+
+- [x] 明确论文递进路线：普通状态机 baseline → 朴素 RL baseline → Transformer RL → Belief/Intent/Utility 新架构
+- [x] 固定阶段级张量格式：`state.bin [73,128,8,6]`、`mask.bin [73,16,128]`、`action.bin [73,16,8]`、`target.bin [73,10]`、`result.json`
+- [x] 固定 128 动作空间：0-47 移动、48-95 航空索敌、96 finish-phase、97 combat、98 transport、99-127 保留
+- [x] 旧 bug 数据归档到 `deeplearn/data/archive_buggy/`，退出 RL 训练链路
+- [x] 新增 `bismarck/engine/tensor-v3.ts`，实现 RL Tensor v3 导出
+- [x] 新增 `bismarck/cli/generate-rl-tensor-v3.ts`，用修复后的 TS 环境生成新数据
+- [x] 长时间数据生成加入可见进度：完成局数、百分比、速度、ETA、胜负、截断
+- [x] 新增 `deeplearn/check_rl_tensor_v3.py`，校验 shape、mask、合法动作、隐藏信息泄露
+- [x] 修复德军视角 Ark Royal 航空覆盖泄露风险
+- [x] 新增 `deeplearn/analyze_rl_tensor_v3.py`，输出胜负比例、胜利类型、来源覆盖、reward/return 分布
+- [x] 新增 `deeplearn/train_rl_baseline.py`，实现 Stage 1 CNN+MLP policy/value 行为克隆入口
+- [x] 修正 exporter 时间语义：73 个阶段槽，阶段内 16 个单位动作槽；TS 引擎原子动作不再挤占时间轴
+- [x] 完成阶段级多 slot smoke test：3 局生成、校验、质量分析通过，`truncated=0`
+- [x] 重新生成仓库内 `deeplearn/data/rl_tensor_v3/raw` 5 局阶段级小样本：德军 2 胜、英军 3 胜、`truncated=0`，F7/6VP/击沉/18 回合胜利类型均出现
+- [x] 创建项目虚拟环境 `.venv`，安装 Stage 1 训练依赖：numpy、torch、tqdm
+- [x] 新增 `deeplearn/requirements.txt` 固定 Python 依赖
+- [x] 完成 Stage 1 行为克隆 smoke 训练：1005 个 `[t,slot]` 样本，MPS 设备，1 epoch，保存 `deeplearn/checkpoints/rl_baseline_stage1_smoke.pt`
+- [x] 启动 Terminal 实时进度窗口，生成 1,000 局 `deeplearn/data/rl_tensor_v3/trial_1000`
+- [x] 发现并修复 exporter 快照引用 bug：tensor step 现在保存当时 GameState 深拷贝，不再引用最终可变状态
+- [x] 发现并修复 Ark Royal 被击沉后仍写航空覆盖的通道泄露风险；清洗本批数据中 37 个错误 ch47 阶段
+- [x] 1,000 局试生产通过校验：德军 422 胜、英军 578 胜、`truncated=0`、`warnings=[]`
+- [x] 1,000 局胜利类型覆盖：6VP 148、18 回合 527、F7 274、击沉 51
+- [x] 完成 `trial_1000` 行为克隆训练：238,502 个 `[t,slot]` 样本，8 epochs，保存 `deeplearn/checkpoints/rl_baseline_stage1_trial1000.pt`
+- [x] `trial_1000` 行为克隆结果：epoch 8 train_acc 0.402，val_acc 0.386，train_loss 1.790，val_loss 1.837
+
 ## 技术栈
 
 | 技术 | 参考 | 用途 |

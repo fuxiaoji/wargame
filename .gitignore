@@ -3,6 +3,7 @@
 
 # Dependencies
 node_modules/
+.venv/
 
 # Build outputs
 cppre/tournament
@@ -10,6 +11,7 @@ cppre/llm_logger
 
 # Training data (large binaries)
 deeplearn/data/
+deeplearn/checkpoints/
 
 # Battle logs
 bismarck/battle_logs/

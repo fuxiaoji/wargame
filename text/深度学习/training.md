@@ -1,114 +1,176 @@
-# 击沉俾斯麦号 — 演化训练流水线
+# 分阶段 RL 训练路线
 
-## 快速开始
+## 论文递进消融
+
+训练路线按论文实验叙事拆成四阶段：
+
+```text
+Stage 0: 状态机 AI baseline
+Stage 1: 朴素 RL baseline
+Stage 2: Transformer RL
+Stage 3: Belief/Intent/Utility 论文新架构
+```
+
+当前只实现 Stage 1，但数据格式已经按最终 `RL Tensor v3` 标准生成，后续阶段复用同一批高质量数据。
+
+## Stage 0: 状态机基线
+
+固定评估池：
+
+- V11 状态机强者
+- 严父 AI
+- 默认状态机
+- 乱打 AI
+
+用途：
+
+- 给 RL 训练提供行为克隆数据
+- 作为后续所有阶段的评估基线
+- 防止封闭自对弈过拟合
+
+## Stage 1: 朴素 RL baseline
+
+### 模型
+
+```text
+state[t] [128,8,6]
+→ CNN encoder
+→ MLP
+→ policy[128] + value
+```
+
+不使用 RNN，不使用 Transformer，不使用 EUA。
+
+### 数据生成
 
 ```bash
-# 50 代训练 (10×10 种群, 每对 100 局, 共 10,000 局/代)
-npx tsx cli/tune-weights.ts 50 10 100
-
-# Ctrl+C 中断 → 自动保存 checkpoint
-# 再次运行 → 从断点恢复
-npx tsx cli/tune-weights.ts
+npx tsx bismarck/cli/generate-rl-tensor-v3.ts \
+  --games 100000 \
+  --out deeplearn/data/rl_tensor_v3/raw \
+  --progress-every-sec 10
 ```
 
-## 架构
+首批数据规模：10万-20万局。
 
-```
-双种群共演化:
+长时间生成必须显示命令行进度，至少包含完成局数、速度、ETA、胜负计数和截断计数。当前生成器已支持 `--progress-every-sec`。
 
-德军种群 (10个体)          英军种群 (10个体)
-w1..w15 各不同            s1-s3, h1-h3, d1-d3 各不同
-     │                          │
-     └── 循环赛: 100对 × 100局 ──┘
-     │                          │
-  排名 (胜率 - 多样性惩罚)   排名 (胜率)
-  保留 Top3 + 多样性下限     保留 Top3
-  变异产生 7 个新个体         变异产生 7 个新个体
-     │                          │
-     └────── 下一代 ────────────┘
-```
+数据来源比例：
 
-## 参数说明
+| 来源 | 比例 |
+|---|---:|
+| V11 状态机强者互打 | 35% |
+| 状态机 vs 严父 | 25% |
+| 状态机 vs 乱打 | 15% |
+| 默认/弱状态机混合 | 10% |
+| 随机扰动状态机权重 | 10% |
+| 高质量局 fallback | 5% |
 
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `GENERATIONS` | 50 | 演化代数 |
-| `POP_SIZE` | 10 | 每个种群的个体数 |
-| `GAMES_PER_PAIR` | 100 | 每对打多少局 (50德+50英) |
-| `TOUR_DIR` | `tournament/` | 输出目录 |
+### 训练步骤
 
-## 德军决策得分函数
+1. 行为克隆：用 `action.bin[t,slot] + mask.bin[t,slot]` 学合法动作分布。
+2. 价值预训练：用 `target.bin` 的 return 字段训练 value head。
+3. PPO 微调：对手池混入 RL checkpoint、状态机、严父、乱打。
 
-每步重新计算，softmax 转概率，加权随机采样。
-
-```
-RushBrest = w1×(1/(distToF7+1)) + w2×(steps/4) + w3×(1-britNearF7/5) - w4×(found?2:0)
-FarmRoutes = w5×(onRoute?1:0) + w6×(1-vp/6) + w7×(found?0:1) + w8×(nearRoutes/total)
-HuntShips = w9×isolatedTargets + w10×(atk-targetDef) - w11×nearbyBritish
-HideDeep = w12×(found?1:0) + w13×(steps<2?1:0) + w14×proximity + w15×(1-vp/6)
-```
-
-**船特定修正**:
-
-| 权重 | 俾斯麦 | 欧根 |
-|---|---|---|
-| RushBrest | +2 | -2 |
-| FarmRoutes | 0 | +1 |
-| HuntShips | -3 | +3 |
-| HideDeep | +1 | 0 |
-
-## 英军决策得分函数 (每船独立)
-
-```
-Search = s1×(!found) - s2×unseenTurns - s3×germanVp/2
-Hunt = h1×(found?1:0) + h2×(5/(distToLast+1)) + h3×fleetAdvantage
-Defend = d1×(gerNearF7?1:0) + d2×(vp>=4?1:0) + d3×(4-shipsNearF7)/4
-```
-
-## 多样性保持
-
-```
-个体最终得分 = avgWinRate - 0.1 × Σⱼ KL(strategy_i || strategy_j)
-淘汰时确保每种策略至少保留 1 个代表
-```
-
-## 断点续训
-
-每代结束后保存 `tournament/checkpoint.json`。Ctrl+C 中断后再次运行自动恢复。
-
-## 输出目录
-
-```
-tournament/
-├── checkpoint.json
-├── summary.json
-├── gen_000/   {ger_population, brit_population, stats}.json
-├── gen_001/   ...
-└── viz/       (运行 visualize_evo.py 后生成)
-    ├── winrate.png
-    ├── diversity.png
-    ├── strategy.png
-    ├── weights.png
-    └── heatmap_sample.png
-```
-
-## 可视化
+当前 Stage 1 离线训练入口：
 
 ```bash
-python3 deeplearn/visualize_evo.py tournament/
+python3 deeplearn/train_rl_baseline.py \
+  --data deeplearn/data/rl_tensor_v3/raw \
+  --out deeplearn/checkpoints/rl_baseline_stage1.pt \
+  --epochs 5 \
+  --batch-size 256
 ```
 
-## 生成训练数据
+该脚本实现 CNN+MLP policy/value、合法动作 mask、行为克隆损失和 value 损失，并输出 batch/epoch 进度。PPO 在线微调尚未接入，需要下一步实现 Python/TypeScript 环境桥接或独立 Python 环境。
 
-演化结束后，用最优权重批量生成训练数据：
+### PPO 对手池
 
-```bash
-# 用 C++ 引擎生成 10 万局 (高速)
-cd cppre && g++ -std=c++20 -O2 tournament.cpp -o tournament
-./tournament --ger-weights tournament/summary.json:bestGer \
-             --brit-weights tournament/summary.json:bestBrit \
-             --games 100000 --output ../deeplearn/data/training/
+| 对手 | 比例 |
+|---|---:|
+| 当前 RL checkpoint | 40% |
+| 历史 RL checkpoint | 20% |
+| V11 状态机 | 20% |
+| 严父 | 15% |
+| 乱打 | 5% |
 
-# 或用 TS 引擎生成
-npx tsx cli/generate-data.ts --games 10000
+### 验收标准
+
+- 能完整跑完 100 局，无非法动作死锁。
+- 对乱打胜率显著高于随机。
+- 对默认状态机接近 50%。
+- 对 V11/严父仍有短板，作为 Stage 2 动机。
+
+## Stage 2: Transformer RL
+
+复用 `RL Tensor v3` 数据，引入历史窗口：
+
+```text
+state[t-k:t]
+→ CNN encoder
+→ Transformer
+→ policy/value
 ```
+
+目标：
+
+- 证明历史序列能改善双盲追踪。
+- 对比 Stage 1，显示长期记忆带来的增益。
+
+验收：
+
+- Transformer RL > 朴素 RL。
+- belief top-k 预测优于单步模型。
+
+## Stage 3: 论文新架构
+
+在 Stage 2 基础上加入：
+
+- Belief head：预测俾斯麦/欧根位置
+- Intent head：预测敌方下一目标
+- Utility/EUA：基于收益矩阵的可解释决策模块
+
+目标：
+
+- 新架构 > Transformer RL
+- 输出可解释 belief/intent/utility 热力图
+- 形成论文核心创新
+
+## 奖励标准
+
+奖励在数据生成阶段写入 `target.bin`。
+
+### 德军
+
+```text
++1.0 德军胜利
+-1.0 德军失败
++0.10 德军新增 VP
+-0.10 英军新增 VP
++0.05 靠近 F7
++0.05 靠近运输航路
+-0.08 俾斯麦受伤
+-0.05 位置公开/信号泄露
+```
+
+### 英军
+
+```text
++1.0 英军胜利
+-1.0 英军失败
++0.10 英军新增 VP
+-0.10 德军新增 VP
++0.12 俾斯麦损失 step
++0.08 新发现俾斯麦
++0.04 靠近真实俾斯麦
+-0.04 舰队过度拥挤
+```
+
+## 旧数据政策
+
+旧 bug 数据归档到：
+
+```text
+deeplearn/data/archive_buggy/
+```
+
+它们不进入训练，只用于复盘。
